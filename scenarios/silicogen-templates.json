@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "name": "silicogen-ui-scenarios-unverified-templates",
+  "template_only": true,
+  "timeout_ms": 600000,
+  "close_on_failure": true,
+  "close_on_cancel": true,
+  "steps": [
+    {
+      "id": "launch-silicogen",
+      "operation": "launch",
+      "params": {
+        "spec": {
+          "program": "silicogen",
+          "args": ["${workspace}"],
+          "cwd": "${workspace}",
+          "env": { "SILICOGEN_STARTUP_TRACE": "1" }
+        },
+        "options": {
+          "profile": "silicogen-test",
+          "workspace": {
+            "mode": "copy",
+            "source": "<configure the validated Silicogen source checkout>"
+          }
+        }
+      }
+    },
+    {
+      "id": "verify-startup",
+      "operation": "wait",
+      "params": {
+        "session_id": "${session}",
+        "predicate": { "kind": "text_contains", "text": "<derive from observed startup UI>" }
+      }
+    },
+    {
+      "id": "sidebar",
+      "operation": "observe",
+      "params": { "intent": "Explore the actual sidebar interaction and record observed input plus expected frame/text." }
+    },
+    {
+      "id": "mcp-command",
+      "operation": "observe",
+      "params": { "intent": "Explore the actual /mcp interaction and record observed input plus expected frame/text." }
+    },
+    {
+      "id": "status-chip",
+      "operation": "observe",
+      "params": { "intent": "Observe the status chip in a deterministic fixture state and derive an assertion from the rendered UI." }
+    },
+    {
+      "id": "subagents-command",
+      "operation": "observe",
+      "params": { "intent": "Explore the actual /subagents interaction and record observed input plus expected frame/text." }
+    },
+    {
+      "id": "fatal-dialog-recovery",
+      "operation": "observe",
+      "params": { "intent": "Reproduce the fatal dialog only in a disposable deterministic fixture, observe the recovery control, then specify restart/assert steps." }
+    }
+  ]
+}

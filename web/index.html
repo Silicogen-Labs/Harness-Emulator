@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Terminal session</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <script type="module" src="/assets/viewer.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand"><span class="brand-mark">SG</span><span>Terminal session</span></div>
+        <div id="connection" class="connection" role="status" aria-live="polite">Connecting…</div>
+      </header>
+
+      <section class="sessionbar" aria-label="Session details">
+        <div class="session-title">
+          <h1 id="session-name">Waiting for terminal</h1>
+          <p id="session-path">The application runs as a local process.</p>
+        </div>
+        <div id="owner" class="owner-chip">Input owner: automation</div>
+      </section>
+
+      <section class="toolbar" aria-label="Terminal controls">
+        <button id="take-control" type="button" hidden>Take control</button>
+        <button id="release-control" type="button" hidden>Return to agent</button>
+        <button id="mouse-mode" type="button" aria-pressed="false">Terminal mouse: off</button>
+        <button id="copy-screen" type="button">Copy screen text</button>
+        <button id="save-frame" type="button" disabled>Save displayed frame</button>
+        <label class="logs-toggle"><input id="expand-logs" type="checkbox" aria-controls="logs-panel" /> Expand logs</label>
+        <div class="scale-control" aria-label="Terminal display scale">
+          <span>Cell zoom</span>
+          <button id="scale-down" type="button" aria-label="Decrease cell zoom">−</button>
+          <output id="scale-value" aria-live="polite">100%</output>
+          <button id="scale-up" type="button" aria-label="Increase cell zoom">+</button>
+          <button id="scale-reset" type="button">Reset zoom</button>
+        </div>
+        <label class="resize-field">Columns <input id="columns" type="number" min="1" max="300" value="120" /></label>
+        <label class="resize-field">Rows <input id="rows" type="number" min="1" max="120" value="40" /></label>
+        <button id="resize-terminal" type="button" disabled>Resize terminal</button>
+        <button id="reset-size" type="button" aria-label="Reset terminal to launch size" disabled>Reset size</button>
+      </section>
+
+      <section id="terminal-workspace" class="terminal-workspace" aria-label="Live terminal and application logs">
+        <section class="terminal-wrap" aria-label="Live terminal viewport">
+          <canvas id="terminal" tabindex="0" aria-label="Terminal display. Take control to send keyboard or mouse input."></canvas>
+          <textarea id="keyboard-input" aria-label="Terminal keyboard input" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+          <pre id="accessible-screen" class="visually-hidden" aria-live="polite"></pre>
+        </section>
+        <aside id="logs-panel" class="logs-panel" aria-label="Application logs" hidden>
+          <div class="logs-heading">
+            <h2>Application logs</h2>
+            <label for="log-source">Source</label>
+            <select id="log-source" aria-label="Log source">
+              <option value="app">App</option>
+              <option value="startup">Startup trace</option>
+            </select>
+          </div>
+          <p id="logs-state" class="logs-state" role="status" aria-live="polite">Logs pause while the viewer is disconnected.</p>
+          <p id="logs-gap" class="logs-gap" role="status" hidden></p>
+          <p id="logs-truncated" class="logs-truncated" role="status" hidden>Older buffered output was trimmed to keep browser log text under 128 KiB.</p>
+          <pre id="logs-output" aria-label="Log output"></pre>
+        </aside>
+      </section>
+
+      <footer class="statusbar">
+        <span id="geometry">Waiting for frame</span>
+        <span id="frame-identity"></span>
+        <span class="mode-label">Per-session XDG state · local process · no filesystem sandbox</span>
+      </footer>
+      <div id="notice" class="notice" role="status" aria-live="polite"></div>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,26 @@
+pub mod artifacts;
+pub mod assertions;
+pub mod automation;
+pub mod client;
+pub mod config;
+pub mod control;
+pub mod daemon;
+pub mod engine;
+pub mod eventlog;
+pub mod frame_store;
+pub mod frame_stream;
+pub mod isolation;
+pub mod launch;
+pub mod logs;
+pub mod predicates;
+pub mod profiles;
+pub mod protocol;
+pub mod retention;
+pub mod scenario;
+pub mod screenshot;
+pub mod service;
+pub mod session;
+pub mod viewer;
+pub mod workspace;
+
+pub use protocol::{FrameSnapshot, LaunchSpec, RpcRequest, RpcResponse};

@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "name": "terminal-fixture-smoke",
+  "template_only": false,
+  "timeout_ms": 60000,
+  "close_on_failure": true,
+  "close_on_cancel": true,
+  "steps": [
+    {
+      "id": "launch-fixture",
+      "operation": "launch",
+      "timeout_ms": 15000,
+      "params": {
+        "program": "${workspace}/target/debug/terminal-fixture",
+        "args": ["--scenario-job", "${scenario_id}"],
+        "cwd": "${workspace}",
+        "cols": 100,
+        "rows": 30
+      },
+      "expect": {
+        "pointer": "/session_id",
+        "truthy": true
+      }
+    },
+    {
+      "id": "wait-for-ready",
+      "operation": "wait",
+      "timeout_ms": 10000,
+      "params": {
+        "session_id": "${session}",
+        "predicate": { "kind": "text_contains", "text": "READY" }
+      },
+      "expect": {
+        "pointer": "/matched",
+        "equals": true
+      }
+    },
+    {
+      "id": "save-ready-frame",
+      "operation": "save_frame",
+      "params": {
+        "session_id": "${session}",
+        "name": "fixture-ready-${scenario_id}"
+      },
+      "expect": {
+        "pointer": "/frame_id",
+        "truthy": true
+      }
+    },
+    {
+      "id": "close-session",
+      "operation": "close",
+      "params": { "session_id": "${session}" }
+    }
+  ]
+}

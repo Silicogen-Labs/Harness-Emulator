@@ -1,0 +1,16 @@
+{
+  "name": "@silicogen/terminal-engine-evaluation",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "description": "Temporary JavaScript compatibility probes; the product runtime is Rust",
+  "scripts": {
+    "probe:js": "bun .runtime/engine-probe.mjs",
+    "probe:rust": "cargo run --manifest-path .runtime/rust-engine-probe/Cargo.toml --bin rust-engine-probe"
+  },
+  "dependencies": {
+    "@microsoft/tui-test": "0.1.0",
+    "tuistory": "0.11.0"
+  }
+}

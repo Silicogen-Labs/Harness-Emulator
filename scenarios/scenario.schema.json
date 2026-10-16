@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://silicogen.invalid/schemas/terminal-scenario-v1.json",
+  "title": "Terminal runtime scenario v1",
+  "description": "Step parameter strings support literal scenario-variable interpolation; values are never evaluated as shell code.",
+  "$comment": "Reserved variables: ${scenario_id} and ${job_id} identify the durable scenario job; ${workspace} is the provided workspace root, or for a launch configured with options.workspace it may remain literal in target cwd/args/argv until launch and is then rebound from capabilities.launch.workspace.root; ${session} and ${run_id} come from launch results, with run_id refreshed by restart results.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "name", "steps"],
+  "properties": {
+    "version": { "const": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "template_only": { "type": "boolean", "default": false },
+    "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 86400000, "default": 600000 },
+    "close_on_failure": { "type": "boolean", "default": false },
+    "close_on_cancel": { "type": "boolean", "default": false },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "operation"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "operation": {
+            "enum": ["launch", "observe", "key", "type", "paste", "mouse", "resize", "wait", "logs", "screenshot", "save_frame", "assert", "diff", "restart", "close"]
+          },
+          "params": { "type": "object", "default": {} },
+          "preconditions": { "type": "object" },
+          "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000, "default": 30000 },
+          "expect": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "pointer": { "type": "string" },
+              "equals": {},
+              "truthy": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

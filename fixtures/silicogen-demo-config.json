@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json.schemastore.org/silicogen.json",
+  "model": "emulation-fixture/display-only",
+  "enabled_providers": ["emulation-fixture"],
+  "provider": {
+    "emulation-fixture": {
+      "id": "emulation-fixture",
+      "name": "Emulation Fixture",
+      "api": "http://127.0.0.1:9/v1",
+      "npm": "@ai-sdk/openai-compatible",
+      "env": ["EMULATION_FIXTURE_API_KEY"],
+      "models": {
+        "display-only": {
+          "id": "display-only",
+          "name": "Display-only fixture model",
+          "release_date": "2026-10-10",
+          "limit": { "context": 8192, "output": 512 },
+          "attachment": false,
+          "reasoning": false,
+          "temperature": false,
+          "tool_call": true,
+          "modalities": { "input": ["text"], "output": ["text"] },
+          "options": {}
+        }
+      }
+    },
+    "azure": {
+      "name": "Azure (fixture placeholder)",
+      "models": {}
+    }
+  }
+}
