@@ -51,6 +51,16 @@ pub struct ArtifactRead {
     pub bytes: Vec<u8>,
 }
 
+/// One member of an atomic batch of caller-identified evidence artifacts.
+pub struct EvidenceFileRegistration<'a> {
+    pub relative_path: &'a Path,
+    pub artifact_id: &'a str,
+    pub source_kind: ArtifactSourceKind,
+    pub content_type: &'a str,
+    pub run_id: Option<String>,
+    pub retention: Option<String>,
+}
+
 struct RegisteredRoot {
     session_id: String,
     label: String,
@@ -169,19 +179,28 @@ impl ArtifactStore {
         kind: ArtifactSourceKind,
         dir: OwnedFd,
     ) -> Result<String> {
-        let root_id = format!("root-{}", Ulid::generate());
-        self.roots
+        let mut roots = self
+            .roots
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                root_id.clone(),
-                RegisteredRoot {
-                    session_id: session_id.to_owned(),
-                    label: label.to_owned(),
-                    kind,
-                    dir,
-                },
-            );
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((root_id, _)) = roots.iter().find(|(_, root)| {
+            root.session_id == session_id
+                && root.label == label
+                && root.kind == kind
+                && same_directory(root.dir.as_raw_fd(), dir.as_raw_fd())
+        }) {
+            return Ok(root_id.clone());
+        }
+        let root_id = format!("root-{}", Ulid::generate());
+        roots.insert(
+            root_id.clone(),
+            RegisteredRoot {
+                session_id: session_id.to_owned(),
+                label: label.to_owned(),
+                kind,
+                dir,
+            },
+        );
         Ok(root_id)
     }
 
@@ -240,6 +259,91 @@ impl ArtifactStore {
             run_id,
             retention,
         )
+    }
+
+    /// Register a related set of evidence files atomically. Every source file,
+    /// root, identity, and collision is checked before any registry entry is
+    /// published, so failed paired evidence cannot leave a discoverable half.
+    pub fn register_evidence_files_with_ids(
+        &self,
+        session_id: &str,
+        root_id: &str,
+        registrations: &[EvidenceFileRegistration<'_>],
+    ) -> Result<Vec<ArtifactMetadata>> {
+        validate_identity(session_id, "session id")?;
+        if registrations.is_empty() {
+            bail!("at least one evidence file is required")
+        }
+        let roots = self
+            .roots
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = roots.get(root_id).context("unknown artifact root")?;
+        if root.session_id != session_id || root.kind == ArtifactSourceKind::ApplicationLog {
+            bail!("artifact root is not a session evidence root")
+        }
+
+        let mut prepared = Vec::with_capacity(registrations.len());
+        let mut ids = std::collections::BTreeSet::new();
+        for registration in registrations {
+            validate_identity(registration.artifact_id, "artifact id")?;
+            validate_relative(registration.relative_path)?;
+            deny_sensitive_path(registration.relative_path)?;
+            if registration.source_kind == ArtifactSourceKind::ApplicationLog {
+                bail!("application logs must be registered under a log root")
+            }
+            if !ids.insert(registration.artifact_id) {
+                bail!("artifact id is duplicated in evidence batch")
+            }
+            let file = open_relative_file(root.dir.as_raw_fd(), registration.relative_path)?;
+            let file_metadata = file.metadata()?;
+            if !file_metadata.is_file() {
+                bail!("artifact source is not a regular file")
+            }
+            let file_name = registration
+                .relative_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("artifact");
+            let metadata = ArtifactMetadata {
+                artifact_id: registration.artifact_id.to_owned(),
+                session_id: session_id.to_owned(),
+                run_id: registration.run_id.clone(),
+                source_kind: registration.source_kind.clone(),
+                display_name: file_name.to_owned(),
+                content_type: registration.content_type.to_owned(),
+                size_bytes: file_metadata.len(),
+                modified_ms: file_metadata.modified().ok().and_then(system_time_ms),
+                retention: registration.retention.clone(),
+            };
+            prepared.push((metadata, registration.relative_path.to_path_buf()));
+        }
+
+        let mut files = self
+            .files
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if prepared
+            .iter()
+            .any(|(metadata, _)| files.contains_key(&metadata.artifact_id))
+        {
+            bail!("artifact id is already registered")
+        }
+        let metadata = prepared
+            .into_iter()
+            .map(|(metadata, relative_path)| {
+                files.insert(
+                    metadata.artifact_id.clone(),
+                    RegisteredFile {
+                        metadata: metadata.clone(),
+                        root_id: root_id.to_owned(),
+                        relative_path,
+                    },
+                );
+                metadata
+            })
+            .collect();
+        Ok(metadata)
     }
 
     #[allow(clippy::too_many_arguments)] // Keep the artifact identity and provenance explicit at the storage boundary.
@@ -617,6 +721,19 @@ fn open_absolute_dir(path: &Path) -> Result<OwnedFd> {
     Ok(current)
 }
 
+fn same_directory(left_fd: libc::c_int, right_fd: libc::c_int) -> bool {
+    let mut left = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let mut right = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(left_fd, left.as_mut_ptr()) } != 0
+        || unsafe { libc::fstat(right_fd, right.as_mut_ptr()) } != 0
+    {
+        return false;
+    }
+    let left = unsafe { left.assume_init() };
+    let right = unsafe { right.assume_init() };
+    left.st_dev == right.st_dev && left.st_ino == right.st_ino
+}
+
 fn deny_sensitive_path(path: &Path) -> Result<()> {
     for component in path.components() {
         let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
@@ -653,7 +770,7 @@ fn deny_sensitive_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_identity(value: &str, label: &str) -> Result<()> {
+pub(crate) fn validate_identity(value: &str, label: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 128
         || !value

@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "ruleId": "main-file-write",
+      "match": { "model": "fixture-main", "stream": true },
+      "responses": [
+        {
+          "toolCalls": [{ "id": "call_write_fixture", "name": "write", "arguments": { "filePath": "fixture-output.txt", "content": "deterministic fixture output\n" } }],
+          "finishReason": "tool_calls"
+        },
+        { "content": "Wrote fixture-output.txt with the requested deterministic content.", "finishReason": "stop" }
+      ]
+    },
+    {
+      "ruleId": "title-helper",
+      "match": { "model": "fixture-title", "stream": true },
+      "responses": [{ "content": "Create fixture output file", "finishReason": "stop" }]
+    },
+    {
+      "ruleId": "summary-helper",
+      "match": { "model": "fixture-summary", "stream": true },
+      "responses": [{ "content": "Created fixture-output.txt with deterministic content.", "finishReason": "stop" }]
+    },
+    {
+      "ruleId": "recap-helper",
+      "match": { "model": "fixture-recap", "stream": true },
+      "responses": [{ "content": "{\"summary\":\"Created fixture-output.txt with deterministic content.\",\"next_action\":null}", "finishReason": "stop" }]
+    },
+    {
+      "ruleId": "recap-turn-helper",
+      "match": { "model": "fixture-recap-turn", "stream": true },
+      "responses": [{ "content": "{\"summary\":\"Wrote fixture-output.txt.\",\"next_action\":null}", "finishReason": "stop" }]
+    }
+  ]
+}

@@ -4,6 +4,7 @@
 use crate::artifacts::validate_relative;
 use crate::protocol::{CellSnapshot, FrameSnapshot};
 use anyhow::{Context, Result, bail};
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::fs::File;
@@ -12,7 +13,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use ulid::Ulid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SavedFrame {
     pub baseline_id: String,
@@ -25,7 +26,7 @@ pub struct SavedFrame {
     pub frame: FrameSnapshot,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 struct StoredFrame {
     baseline_id: String,
     name: String,
@@ -136,7 +137,7 @@ impl FrameStore {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CellMask {
     pub row: u16,
@@ -146,7 +147,7 @@ pub struct CellMask {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CellDelta {
     pub row: u16,
@@ -155,7 +156,7 @@ pub struct CellDelta {
     pub actual: CellSnapshot,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FrameDiff {
     pub expected_baseline_id: String,
@@ -172,7 +173,7 @@ pub struct FrameDiff {
     pub note: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChangedRegion {
     pub row: u16,
@@ -322,7 +323,7 @@ fn open_file(root_fd: i32, name: &str) -> Result<File> {
         )
     };
     if fd < 0 {
-        bail!("open named baseline: {}", std::io::Error::last_os_error())
+        return Err(std::io::Error::last_os_error()).context("open named baseline");
     }
     let file = unsafe { File::from_raw_fd(fd) };
     let metadata = file.metadata()?;

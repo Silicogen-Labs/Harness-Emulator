@@ -4,6 +4,7 @@
 //! prefixes are never sufficient ownership evidence.
 
 use anyhow::{Context, Result, bail};
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
@@ -14,7 +15,7 @@ use ulid::Ulid;
 
 const MANIFEST_VERSION: u16 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OwnerKind {
     Session,
@@ -25,7 +26,7 @@ pub enum OwnerKind {
     Profile,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RetentionClass {
     Successful,
@@ -33,7 +34,7 @@ pub enum RetentionClass {
     Interactive,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedEntry {
     pub id: String,
@@ -67,7 +68,7 @@ impl ManagedEntry {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct RetentionPolicy {
     pub successful_ms: u128,
@@ -98,7 +99,7 @@ impl Default for RetentionPolicy {
 }
 
 /// One target path claimed by a durable quota reservation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReservationTarget {
     pub relative_path: PathBuf,
@@ -121,14 +122,14 @@ impl ReservationTarget {
 }
 
 /// Handle returned after capacity has been durably claimed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaReservation {
     pub id: String,
     pub reserved_bytes: u64,
     pub targets: Vec<ReservationTarget>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CleanupCandidate {
     pub id: String,
     pub path: PathBuf,
@@ -136,7 +137,7 @@ pub struct CleanupCandidate {
     pub bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProtectedEntry {
     pub id: String,
     pub path: PathBuf,
@@ -144,7 +145,7 @@ pub struct ProtectedEntry {
     pub bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CleanupPlan {
     pub token: String,
     pub generation: u64,
@@ -155,14 +156,14 @@ pub struct CleanupPlan {
     pub unowned_legacy_paths: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AppliedCleanup {
     pub removed: Vec<CleanupCandidate>,
     pub total_bytes: u64,
     pub generation: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BudgetStatus {
     pub used_bytes: u64,
     pub requested_bytes: u64,
@@ -178,7 +179,7 @@ pub struct BudgetStatus {
     pub quota_exceeded: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 struct OwnerManifest {
     version: u16,
     generation: u64,
@@ -282,6 +283,122 @@ impl RetentionRegistry {
 
     pub fn entries(&self) -> &[ManagedEntry] {
         &self.manifest.entries
+    }
+
+    /// Drop accounting only after an owned workspace was actually disposed.
+    pub fn forget_disposed_workspace(&mut self, relative: &Path) -> Result<()> {
+        validate_relative_path(relative)?;
+        let _lock = ManifestLock::acquire(self.manifest_path.parent().unwrap())?;
+        self.reload_manifest()?;
+        match fs::symlink_metadata(self.root.join(relative)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => bail!(
+                "workspace_not_disposed: refusing to remove live or unreadable ownership accounting"
+            ),
+        }
+        if let Some(entry) = self
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == relative)
+        {
+            if entry.kind != OwnerKind::TestWorkspace || entry.pinned {
+                bail!("workspace_not_disposable: entry is protected");
+            }
+            self.manifest
+                .entries
+                .retain(|entry| entry.relative_path != relative);
+            self.bump_and_persist()?;
+        }
+        Ok(())
+    }
+
+    /// Validate ownership and protected descendants, then remove the state and
+    /// optional test workspace while holding the manifest lock across both
+    /// checks and unlink operations. A separately registered descendant makes
+    /// recursive workspace disposal unsafe, regardless of its retention age.
+    pub fn dispose_test_allocation(
+        &mut self,
+        state_relative: &Path,
+        workspace_relative: Option<&Path>,
+    ) -> Result<()> {
+        validate_relative_path(state_relative)?;
+        if state_relative.file_name().and_then(|name| name.to_str()) != Some("state") {
+            bail!("invalid_disposal_target: expected a session state directory")
+        }
+        if let Some(workspace) = workspace_relative {
+            validate_relative_path(workspace)?;
+            if workspace
+                .components()
+                .next()
+                .and_then(|part| part.as_os_str().to_str())
+                != Some("workspaces")
+            {
+                bail!("invalid_disposal_target: expected a managed workspace directory")
+            }
+        }
+
+        let _lock = ManifestLock::acquire(self.manifest_path.parent().unwrap())?;
+        self.reload_manifest()?;
+
+        let session_owner_path = state_relative
+            .parent()
+            .context("state path has no session owner")?;
+        let session_owner = self
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.relative_path == session_owner_path && entry.kind == OwnerKind::Session
+            })
+            .context("session state has no registered session owner")?;
+        if session_owner.pinned || self.is_profile_protected(state_relative) {
+            bail!("session_state_protected: refusing to dispose protected session state")
+        }
+        if self.manifest.entries.iter().any(|entry| {
+            entry.relative_path != state_relative && entry.relative_path.starts_with(state_relative)
+        }) {
+            bail!("session_state_has_registered_descendant: refusing recursive disposal")
+        }
+
+        if let Some(workspace) = workspace_relative {
+            let owner = self
+                .manifest
+                .entries
+                .iter()
+                .find(|entry| {
+                    entry.relative_path == workspace && entry.kind == OwnerKind::TestWorkspace
+                })
+                .context("test workspace has no registered owner")?;
+            if owner.pinned || self.is_profile_protected(workspace) {
+                bail!("workspace_protected: refusing to dispose protected test workspace")
+            }
+            if self.has_registered_descendant(workspace, &owner.id) {
+                bail!("workspace_has_registered_descendant: refusing recursive disposal")
+            }
+        }
+
+        for relative in std::iter::once(state_relative).chain(workspace_relative) {
+            match fs::symlink_metadata(self.root.join(relative)) {
+                Ok(_) => validate_tree_path(&self.root, &self.root.join(relative))?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        for relative in std::iter::once(state_relative).chain(workspace_relative) {
+            let path = self.root.join(relative);
+            if path.exists() {
+                remove_owned_path(&path)?;
+            }
+        }
+        if let Some(workspace) = workspace_relative {
+            self.manifest
+                .entries
+                .retain(|entry| entry.relative_path != workspace);
+        }
+        self.bump_and_persist()?;
+        Ok(())
     }
 
     /// Report managed storage usage and fail with a stable quota marker when a
@@ -466,6 +583,8 @@ impl RetentionRegistry {
     /// component must resolve inside the registry root without a symlink.
     pub fn register(&mut self, entry: ManagedEntry) -> Result<()> {
         validate_relative_path(&entry.relative_path)?;
+        let _lock = ManifestLock::acquire(self.manifest_path.parent().unwrap())?;
+        self.reload_manifest()?;
         let full_path = self.root.join(&entry.relative_path);
         validate_tree_path(&self.root, &full_path)?;
         if self

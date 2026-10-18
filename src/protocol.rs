@@ -1,9 +1,10 @@
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const PROTOCOL_VERSION: u16 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchSpec {
     pub name: Option<String>,
     pub program: String,
@@ -12,17 +13,25 @@ pub struct LaunchSpec {
     pub cwd: String,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[schemars(range(min = 1, max = 300))]
     pub cols: u16,
+    #[schemars(range(min = 1, max = 120))]
     pub rows: u16,
     #[serde(default)]
     pub record_output: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)] // Keep the public request construction API flat; requests are not buffered in bulk.
 pub enum RpcRequest {
     Ping,
+    /// Explicit revision negotiation; v1 requests retain their legacy payloads.
+    Contract {
+        revision: u16,
+        request: Box<RpcRequest>,
+        response: Option<crate::projection::ResponseOptions>,
+    },
     Launch {
         spec: LaunchSpec,
     },
@@ -112,8 +121,8 @@ pub enum RpcRequest {
     Shutdown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MouseInput {
     Move {
         row: u16,
@@ -137,21 +146,35 @@ pub enum MouseInput {
         row: u16,
         col: u16,
         direction: WheelDirection,
+        #[schemars(range(min = 1, max = 20))]
         steps: u16,
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentAction {
-    Key { key: String },
-    Type { text: String },
-    Paste { text: String },
-    Mouse { input: MouseInput },
-    Resize { cols: u16, rows: u16 },
+    Key {
+        key: String,
+    },
+    Type {
+        text: String,
+    },
+    Paste {
+        text: String,
+    },
+    Mouse {
+        input: MouseInput,
+    },
+    Resize {
+        #[schemars(range(min = 1, max = 300))]
+        cols: u16,
+        #[schemars(range(min = 1, max = 120))]
+        rows: u16,
+    },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ActionContext {
     pub actor_id: String,
@@ -163,7 +186,7 @@ pub struct ActionContext {
     pub controller_generation: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum MouseButton {
     Left,
@@ -171,14 +194,14 @@ pub enum MouseButton {
     Right,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum WheelDirection {
     Up,
     Down,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WaitPredicate {
     TextContains { text: String },
@@ -188,14 +211,14 @@ pub enum WaitPredicate {
     ProcessExited,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RpcRequestEnvelope {
     pub version: u16,
     pub request_id: String,
     pub request: RpcRequest,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RpcResponse {
     pub version: u16,
     pub request_id: String,
@@ -206,7 +229,7 @@ pub struct RpcResponse {
     pub error: Option<RpcError>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RpcError {
     pub code: String,
     pub message: String,
@@ -244,7 +267,7 @@ impl RpcResponse {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionSummary {
     pub session_id: String,
     pub name: Option<String>,
@@ -260,7 +283,7 @@ pub struct SessionSummary {
     pub process_group: Option<i32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CellSnapshot {
     pub text: String,
     pub width: usize,
@@ -280,7 +303,9 @@ pub struct CellSnapshot {
     pub hyperlink: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ColorValue {
     Named(u8),
@@ -288,7 +313,7 @@ pub enum ColorValue {
     Rgb(u8, u8, u8),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FrameSnapshot {
     pub session_id: String,
     pub run_id: String,
@@ -318,7 +343,7 @@ pub struct FrameSnapshot {
     pub capture_warning: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StyledRun {
     pub row: u16,
     pub start_col: u16,
@@ -327,7 +352,9 @@ pub struct StyledRun {
     pub style: CellStyle,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub struct CellStyle {
     pub foreground: String,
     pub background: String,
@@ -343,7 +370,7 @@ pub struct CellStyle {
     pub hyperlink: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CellRegionSnapshot {
     pub session_id: String,
     pub run_id: String,
@@ -356,7 +383,7 @@ pub struct CellRegionSnapshot {
     pub cells: Vec<Vec<CellSnapshot>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CursorSnapshot {
     pub row: u16,
     pub col: u16,
@@ -365,7 +392,7 @@ pub struct CursorSnapshot {
     pub color: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ScreenshotArtifact {
     pub artifact_id: String,
     pub session_id: String,
@@ -378,7 +405,7 @@ pub struct ScreenshotArtifact {
     pub captured_at_ms: u128,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistorySnapshot {
     pub session_id: String,
     pub run_id: String,
@@ -392,7 +419,7 @@ pub struct HistorySnapshot {
     pub replayable: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RecordedEvent {
     pub sequence: u64,
     pub at_ms: u128,
@@ -405,7 +432,7 @@ pub struct RecordedEvent {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WaitResult {
     pub matched: bool,
     pub timed_out: bool,

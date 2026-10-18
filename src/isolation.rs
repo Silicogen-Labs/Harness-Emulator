@@ -2,13 +2,14 @@
 
 use crate::protocol::LaunchSpec;
 use anyhow::{Context, Result, bail, ensure};
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum IsolationBackend {
     #[default]
@@ -16,7 +17,7 @@ pub enum IsolationBackend {
     Bubblewrap,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkPolicy {
     #[default]
@@ -24,7 +25,7 @@ pub enum NetworkPolicy {
     None,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct IsolationSpec {
     pub backend: IsolationBackend,
@@ -46,6 +47,11 @@ pub fn wrap_command(
             "network=none requires the bubblewrap isolation backend; refusing unrestricted host launch"
         );
         return Ok(spec.clone());
+    }
+    // The dynamic loader starts the broker before Bubblewrap establishes its
+    // namespaces. These variables must not inject code into that host process.
+    for name in spec.env.keys() {
+        crate::profiles::validate_test_environment_name(name)?;
     }
     ensure!(
         cfg!(target_os = "linux"),
@@ -171,7 +177,7 @@ pub fn capabilities(isolation: &IsolationSpec) -> Value {
     }
 }
 
-fn find_bwrap() -> Result<PathBuf> {
+pub(crate) fn find_bwrap() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("PATH") {
         for directory in std::env::split_paths(&path) {
             let candidate = directory.join("bwrap");

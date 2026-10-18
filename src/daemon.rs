@@ -124,11 +124,15 @@ async fn handle_connection(
         write_response(&mut write, &response).await?;
         return Ok(());
     }
-    let request: RpcRequestEnvelope = match serde_json::from_slice(&line) {
+    let parsed = serde_json::from_slice::<serde_json::Value>(&line)
+        .map_err(|_| crate::validation::RequestError::new("request", "valid JSON request envelope"))
+        .and_then(crate::validation::decode::<RpcRequestEnvelope>);
+    let request: RpcRequestEnvelope = match parsed {
         Ok(request) => request,
         Err(error) => {
-            let response =
-                RpcResponse::failure("invalid".into(), "invalid_request", error.to_string());
+            let mut response =
+                RpcResponse::failure("invalid".into(), &error.code, error.to_string());
+            response.error.as_mut().unwrap().details = Some(serde_json::to_value(error)?);
             write_response(&mut write, &response).await?;
             return Ok(());
         }
@@ -168,6 +172,13 @@ async fn handle_connection(
             RpcResponse::success(id, result)
         }
         Err(error) => {
+            if let Some(validation) = error.downcast_ref::<crate::validation::RequestError>() {
+                let mut response =
+                    RpcResponse::failure(id, &validation.code, validation.to_string());
+                response.error.as_mut().unwrap().details = Some(serde_json::to_value(validation)?);
+                write_response(&mut write, &response).await?;
+                return Ok(());
+            }
             let code = classify_error(&error);
             let mut response = RpcResponse::failure(id, &code, error.to_string());
             if let Some(failure) = response.error.as_mut() {

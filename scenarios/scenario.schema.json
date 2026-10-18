@@ -1,45 +1,3397 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://silicogen.invalid/schemas/terminal-scenario-v1.json",
-  "title": "Terminal runtime scenario v1",
-  "description": "Step parameter strings support literal scenario-variable interpolation; values are never evaluated as shell code.",
-  "$comment": "Reserved variables: ${scenario_id} and ${job_id} identify the durable scenario job; ${workspace} is the provided workspace root, or for a launch configured with options.workspace it may remain literal in target cwd/args/argv until launch and is then rebound from capabilities.launch.workspace.root; ${session} and ${run_id} come from launch results, with run_id refreshed by restart results.",
+  "title": "Scenario",
+  "description": "A versioned scenario document. Validation is performed before a job is\ncreated or any backend operation is executed.",
   "type": "object",
-  "additionalProperties": false,
-  "required": ["version", "name", "steps"],
   "properties": {
-    "version": { "const": 1 },
-    "name": { "type": "string", "minLength": 1 },
-    "template_only": { "type": "boolean", "default": false },
-    "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 86400000, "default": 600000 },
-    "close_on_failure": { "type": "boolean", "default": false },
-    "close_on_cancel": { "type": "boolean", "default": false },
+    "close_on_cancel": {
+      "type": "boolean",
+      "default": false
+    },
+    "close_on_failure": {
+      "type": "boolean",
+      "default": false
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
     "steps": {
       "type": "array",
-      "minItems": 1,
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "operation"],
-        "properties": {
-          "id": { "type": "string", "minLength": 1 },
-          "operation": {
-            "enum": ["launch", "observe", "key", "type", "paste", "mouse", "resize", "wait", "logs", "screenshot", "save_frame", "assert", "diff", "restart", "close"]
-          },
-          "params": { "type": "object", "default": {} },
-          "preconditions": { "type": "object" },
-          "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000, "default": 30000 },
-          "expect": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "pointer": { "type": "string" },
-              "equals": {},
-              "truthy": { "type": "boolean" }
-            }
-          }
+        "$ref": "#/$defs/ScenarioStep"
+      },
+      "minItems": 1
+    },
+    "template_only": {
+      "type": "boolean",
+      "default": false
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "default": 600000,
+      "maximum": 86400000,
+      "minimum": 1
+    },
+    "version": {
+      "type": "integer",
+      "format": "uint16",
+      "const": 1,
+      "maximum": 65535,
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "name",
+    "steps"
+  ],
+  "$defs": {
+    "ActionContext": {
+      "type": "object",
+      "properties": {
+        "action_id": {
+          "type": "string"
+        },
+        "actor_id": {
+          "type": "string"
+        },
+        "controller_generation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "expected_run_id": {
+          "type": "string"
+        },
+        "expected_viewport_revision": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
         }
-      }
+      },
+      "additionalProperties": false,
+      "required": [
+        "actor_id",
+        "action_id",
+        "expected_run_id"
+      ]
+    },
+    "AgentAction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "key"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "key"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "type"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "paste"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "input": {
+              "$ref": "#/$defs/MouseInput"
+            },
+            "kind": {
+              "type": "string",
+              "const": "mouse"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cols": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 300,
+              "minimum": 1
+            },
+            "kind": {
+              "type": "string",
+              "const": "resize"
+            },
+            "rows": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 120,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "cols",
+            "rows"
+          ]
+        }
+      ]
+    },
+    "AssertArgs": {
+      "type": "object",
+      "properties": {
+        "assertion": {
+          "$ref": "#/$defs/FrameAssertion"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "assertion"
+      ]
+    },
+    "BarrierBaseline": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "previous_input"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "explicit"
+            },
+            "value": {
+              "$ref": "#/$defs/ObservationIdentity"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
+    },
+    "BarrierCondition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "predicate"
+            },
+            "predicate": {
+              "$ref": "#/$defs/PredicateSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "predicate"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "fresh"
+            },
+            "predicate": {
+              "$ref": "#/$defs/FreshWaitSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "predicate"
+          ]
+        }
+      ]
+    },
+    "CaptureAuthority": {
+      "type": "object",
+      "properties": {
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "viewport_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "run_id",
+        "viewport_revision",
+        "cols",
+        "rows"
+      ]
+    },
+    "CaptureBudget": {
+      "type": "object",
+      "properties": {
+        "max_bytes": {
+          "description": "Snapshot allocations plus conservative retained-record overhead.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_frame_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_frames": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "max_frames",
+        "max_bytes",
+        "max_frame_bytes"
+      ]
+    },
+    "CaptureCompletion": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "disappeared"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "A later observation must lack the appearance query and contain this query.",
+          "type": "object",
+          "properties": {
+            "condition": {
+              "$ref": "#/$defs/CaptureQuery"
+            },
+            "kind": {
+              "type": "string",
+              "const": "replaced"
+            }
+          },
+          "required": [
+            "kind",
+            "condition"
+          ]
+        }
+      ]
+    },
+    "CaptureJobArgs": {
+      "description": "Arm, inspect, cancel, or materialize a bounded transient-UI capture job.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "start",
+            "status",
+            "cancel",
+            "materialize",
+            "release"
+          ]
+        },
+        "frame_index": {
+          "description": "Required only for materialize; index from the status frame list.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "maximum": 127,
+          "minimum": 0
+        },
+        "handle": {
+          "description": "Required for status/cancel/materialize.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request": {
+          "description": "Required for start. Capture is armed before the call returns.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CaptureRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response": {
+          "description": "Summary is compact by default; full includes bounded frame references.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "action"
+      ]
+    },
+    "CaptureQuery": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "$ref": "#/$defs/LocatorQuery"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CellRect"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "query"
+      ]
+    },
+    "CaptureRequest": {
+      "type": "object",
+      "properties": {
+        "appearance": {
+          "$ref": "#/$defs/CaptureQuery"
+        },
+        "authority": {
+          "$ref": "#/$defs/CaptureAuthority"
+        },
+        "budget": {
+          "$ref": "#/$defs/CaptureBudget"
+        },
+        "burst": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SampleBurst"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CaptureCompletion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "handle": {
+          "type": "string"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "handle",
+        "authority",
+        "appearance",
+        "budget",
+        "timeout_ms"
+      ]
+    },
+    "CellMask": {
+      "type": "object",
+      "properties": {
+        "col": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "reason": {
+          "type": "string"
+        },
+        "row": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "row",
+        "col",
+        "rows",
+        "cols",
+        "reason"
+      ]
+    },
+    "CellRect": {
+      "type": "object",
+      "properties": {
+        "col_end": {
+          "description": "Exclusive end coordinate.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "col_start": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "row_end": {
+          "description": "Exclusive end coordinate.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "row_start": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "row_start",
+        "col_start",
+        "row_end",
+        "col_end"
+      ]
+    },
+    "CellStyle": {
+      "type": "object",
+      "properties": {
+        "background": {
+          "type": "string"
+        },
+        "blink": {
+          "type": "boolean"
+        },
+        "bold": {
+          "type": "boolean"
+        },
+        "dim": {
+          "type": "boolean"
+        },
+        "foreground": {
+          "type": "string"
+        },
+        "hyperlink": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inverse": {
+          "type": "boolean"
+        },
+        "invisible": {
+          "type": "boolean"
+        },
+        "italic": {
+          "type": "boolean"
+        },
+        "strike": {
+          "type": "boolean"
+        },
+        "underline": {
+          "type": "string"
+        },
+        "underline_color": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ColorValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "foreground",
+        "background",
+        "bold",
+        "dim",
+        "italic",
+        "inverse",
+        "invisible",
+        "strike",
+        "blink",
+        "underline"
+      ]
+    },
+    "CellsArgs": {
+      "type": "object",
+      "properties": {
+        "col": {
+          "description": "Zero-based left column.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "cols": {
+          "description": "Number of columns, at most 120.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 120,
+          "minimum": 1
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "row": {
+          "description": "Zero-based top row.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "rows": {
+          "description": "Number of rows, at most 40.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 40,
+          "minimum": 1
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "row",
+        "col",
+        "rows",
+        "cols"
+      ]
+    },
+    "ColorValue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "named"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "indexed"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "rgb"
+            },
+            "value": {
+              "type": "array",
+              "maxItems": 3,
+              "minItems": 3,
+              "prefixItems": [
+                {
+                  "type": "integer",
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0
+                },
+                {
+                  "type": "integer",
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0
+                },
+                {
+                  "type": "integer",
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
+    },
+    "DiffArgs": {
+      "type": "object",
+      "properties": {
+        "masks": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CellMask"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "name"
+      ]
+    },
+    "FinalizeArgs": {
+      "type": "object",
+      "properties": {
+        "actor_id": {
+          "description": "Required while another automation actor owns input. Never steals browser control.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expected_run_id": {
+          "description": "The observed application run, not a scenario/job ID.",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/Outcome"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "expected_run_id",
+        "outcome"
+      ]
+    },
+    "FrameAssertion": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "text_contains"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "text_absent"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "regex"
+            },
+            "pattern": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "pattern"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "col": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "cell_text"
+            },
+            "row": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "row",
+            "col",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "col": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "cell_style"
+            },
+            "row": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "style": {
+              "$ref": "#/$defs/CellStyle"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "row",
+            "col",
+            "style"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "assertions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FrameAssertion"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "all"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "assertions"
+          ]
+        }
+      ]
+    },
+    "FrameIdentity": {
+      "type": "object",
+      "properties": {
+        "frame_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "run_id",
+        "frame_id"
+      ]
+    },
+    "FreshTransition": {
+      "type": "string",
+      "enum": [
+        "current_presence",
+        "became_present",
+        "match_intersects_changed_cells"
+      ]
+    },
+    "FreshWaitArgs": {
+      "type": "object",
+      "properties": {
+        "cancel": {
+          "type": "boolean",
+          "default": false
+        },
+        "poll_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 200,
+          "maximum": 5000,
+          "minimum": 0
+        },
+        "prior_observation": {
+          "description": "Identity returned by terminal_observe or a prior action receipt.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObservationIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "description": "Required with prior_observation, spec and timeout_ms when creating a wait.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "spec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FreshWaitSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 3600000,
+          "minimum": 1
+        },
+        "wait_id": {
+          "description": "Stable handle returned by the first poll. Reuse the same handle to resume; may be supplied\non creation as an idempotency key.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "wait_id"
+          ]
+        },
+        {
+          "required": [
+            "session_id",
+            "prior_observation",
+            "spec",
+            "timeout_ms"
+          ]
+        }
+      ]
+    },
+    "FreshWaitSpec": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "$ref": "#/$defs/LocatorQuery"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CellRect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "transition": {
+          "$ref": "#/$defs/FreshTransition"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "query",
+        "transition"
+      ]
+    },
+    "IsolationBackend": {
+      "type": "string",
+      "enum": [
+        "host",
+        "bubblewrap"
+      ]
+    },
+    "IsolationSpec": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/IsolationBackend",
+          "default": "host"
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkPolicy",
+          "default": "host"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LaunchOptions": {
+      "type": "object",
+      "properties": {
+        "disposable": {
+          "type": "boolean",
+          "default": false
+        },
+        "env_inherit": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "string"
+          }
+        },
+        "env_unset": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "isolation": {
+          "$ref": "#/$defs/IsolationSpec",
+          "default": {
+            "backend": "host",
+            "network": "host"
+          }
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "seeds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StateSeed"
+          }
+        },
+        "sensitive_args": {
+          "description": "Argument positions whose values must not be persisted or returned in metadata.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "shell": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ShellSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "state_mode": {
+          "$ref": "#/$defs/StateMode",
+          "default": "isolated"
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "LaunchSpec": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 300,
+          "minimum": 1
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "program": {
+          "type": "string"
+        },
+        "record_output": {
+          "type": "boolean",
+          "default": false
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 120,
+          "minimum": 1
+        }
+      },
+      "required": [
+        "program",
+        "cwd",
+        "cols",
+        "rows"
+      ]
+    },
+    "LocatorArgs": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "$ref": "#/$defs/LocatorQuery"
+        },
+        "region": {
+          "description": "Zero-based half-open cell rectangle; omitted searches the current viewport.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CellRect"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "query"
+      ]
+    },
+    "LocatorQuery": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "text"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "regex"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
+    },
+    "LogCursor": {
+      "type": "object",
+      "properties": {
+        "artifact_id": {
+          "type": "string"
+        },
+        "device": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "inode": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "offset": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "device",
+        "inode",
+        "offset"
+      ]
+    },
+    "LogsArgs": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LogCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "default": 65536,
+          "minimum": 0
+        },
+        "path": {
+          "type": "string",
+          "default": "dev.log"
+        },
+        "session_id": {
+          "type": "string",
+          "default": ""
+        },
+        "source": {
+          "type": "string",
+          "default": "app",
+          "enum": [
+            "app",
+            "startup",
+            "daemon"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "MouseButton": {
+      "type": "string",
+      "enum": [
+        "left",
+        "middle",
+        "right"
+      ]
+    },
+    "MouseInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "col": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "move"
+            },
+            "row": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "row",
+            "col"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "button": {
+              "$ref": "#/$defs/MouseButton"
+            },
+            "col": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "click"
+            },
+            "row": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "row",
+            "col",
+            "button"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "button": {
+              "$ref": "#/$defs/MouseButton"
+            },
+            "col": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "down"
+            },
+            "row": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "row",
+            "col",
+            "button"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "col": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "up"
+            },
+            "row": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "row",
+            "col"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "col": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "direction": {
+              "$ref": "#/$defs/WheelDirection"
+            },
+            "kind": {
+              "type": "string",
+              "const": "wheel"
+            },
+            "row": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "steps": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 20,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "row",
+            "col",
+            "direction",
+            "steps"
+          ]
+        }
+      ]
+    },
+    "NetworkPolicy": {
+      "type": "string",
+      "enum": [
+        "host",
+        "none"
+      ]
+    },
+    "ObservationIdentity": {
+      "type": "object",
+      "properties": {
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "frame_id": {
+          "type": "string"
+        },
+        "observation_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "viewport_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "session_id",
+        "run_id",
+        "frame_id",
+        "observation_revision",
+        "viewport_revision",
+        "cols",
+        "rows"
+      ]
+    },
+    "ObserveArgs": {
+      "type": "object",
+      "properties": {
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id"
+      ]
+    },
+    "Outcome": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed",
+        "cancelled",
+        "interrupted",
+        "unknown"
+      ]
+    },
+    "PredicateSpec": {
+      "examples": [
+        {
+          "kind": "text_contains",
+          "text": "READY"
+        },
+        {
+          "busy": [
+            "Working"
+          ],
+          "crash": [
+            "fatal error"
+          ],
+          "kind": "ready",
+          "required": [
+            "READY"
+          ]
+        },
+        {
+          "col": 0,
+          "cols": 20,
+          "duration_ms": 250,
+          "kind": "stable_region",
+          "row": 0,
+          "rows": 5
+        }
+      ],
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "text_contains"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "text_absent"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "regex"
+            },
+            "pattern": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "pattern"
+          ]
+        },
+        {
+          "description": "The PTY output sequence must not advance for this duration.",
+          "type": "object",
+          "properties": {
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "output_quiet"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "duration_ms"
+          ]
+        },
+        {
+          "description": "Visible text must remain equal for this duration. PTY output elsewhere\ndoes not reset this timer.",
+          "type": "object",
+          "properties": {
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "stable_text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "duration_ms"
+          ]
+        },
+        {
+          "description": "Cell content and style in the specified zero-based region must remain\nequal for this duration.",
+          "type": "object",
+          "properties": {
+            "col": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "cols": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "stable_region"
+            },
+            "row": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "rows": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "row",
+            "col",
+            "rows",
+            "cols",
+            "duration_ms"
+          ]
+        },
+        {
+          "description": "Required markers must all be present; configured busy and crash markers\nmust be absent. Optional region stability can further gate readiness.",
+          "type": "object",
+          "properties": {
+            "busy": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "crash": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "ready"
+            },
+            "required": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "stable_region": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RegionStability"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "process_exited"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "RegionStability": {
+      "type": "object",
+      "properties": {
+        "col": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "duration_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "row": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "row",
+        "col",
+        "rows",
+        "cols",
+        "duration_ms"
+      ]
+    },
+    "ResponseMode": {
+      "type": "string",
+      "enum": [
+        "summary",
+        "text",
+        "diff",
+        "full"
+      ]
+    },
+    "ResponseOptions": {
+      "type": "object",
+      "properties": {
+        "baseline": {
+          "description": "Required for diff. Identities are run-scoped, not globally unique frame strings.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FrameIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "max_bytes": {
+          "description": "Compact JSON payload budget; MCP adds at most 512 bytes of bounded presentation metadata.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "maximum": 4194304,
+          "minimum": 256
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "styles": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "max_bytes": 1024,
+          "mode": "summary"
+        },
+        {
+          "baseline": {
+            "frame_id": "fr-00000001",
+            "run_id": "run-id",
+            "session_id": "session-id"
+          },
+          "max_bytes": 4096,
+          "mode": "diff"
+        },
+        {
+          "mode": "full",
+          "styles": true
+        }
+      ]
+    },
+    "SampleBurst": {
+      "type": "object",
+      "properties": {
+        "duration_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "interval_ms": {
+          "description": "Samples begin at arm time. Slots at or after duration_ms are excluded.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "interval_ms",
+        "duration_ms"
+      ]
+    },
+    "SaveArgs": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "name"
+      ]
+    },
+    "ScenarioExpectation": {
+      "description": "Optional machine-checkable result requirement. `pointer` uses JSON Pointer.\nExactly one of `equals` or `truthy` may be supplied; with neither, a\nsuccessful backend call is the required result.",
+      "type": "object",
+      "properties": {
+        "equals": {
+          "default": null
+        },
+        "pointer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "truthy": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "ScenarioKeyArgs": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "key"
+      ]
+    },
+    "ScenarioLaunchArgs": {
+      "type": "object",
+      "properties": {
+        "options": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LaunchOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "spec": {
+          "$ref": "#/$defs/LaunchSpec"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "spec"
+      ]
+    },
+    "ScenarioMouseArgs": {
+      "type": "object",
+      "properties": {
+        "input": {
+          "$ref": "#/$defs/MouseInput"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "input"
+      ]
+    },
+    "ScenarioPreconditions": {
+      "description": "Expected state used by a scripted terminal input. Fields are optional for\ncompatibility; each supplied value is validated before the job can run.",
+      "type": "object",
+      "properties": {
+        "expected_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expected_viewport_revision": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ScenarioResizeArgs": {
+      "type": "object",
+      "properties": {
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 300,
+          "minimum": 1
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 120,
+          "minimum": 1
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "cols",
+        "rows"
+      ]
+    },
+    "ScenarioStep": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "launch"
+            },
+            "params": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ScenarioLaunchArgs"
+                },
+                {
+                  "properties": {
+                    "options": {
+                      "$ref": "#/$defs/LaunchOptions"
+                    }
+                  },
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/LaunchSpec"
+                    }
+                  ]
+                }
+              ]
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "observe"
+            },
+            "params": {
+              "$ref": "#/$defs/ObserveArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "cells"
+            },
+            "params": {
+              "$ref": "#/$defs/CellsArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "locate"
+            },
+            "params": {
+              "$ref": "#/$defs/LocatorArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "key"
+            },
+            "params": {
+              "$ref": "#/$defs/ScenarioKeyArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "type"
+            },
+            "params": {
+              "$ref": "#/$defs/ScenarioTextArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "paste"
+            },
+            "params": {
+              "$ref": "#/$defs/ScenarioTextArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "mouse"
+            },
+            "params": {
+              "$ref": "#/$defs/ScenarioMouseArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "resize"
+            },
+            "params": {
+              "$ref": "#/$defs/ScenarioResizeArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "wait"
+            },
+            "params": {
+              "$ref": "#/$defs/WaitArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "wait_fresh"
+            },
+            "params": {
+              "$ref": "#/$defs/FreshWaitArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "sequence"
+            },
+            "params": {
+              "$ref": "#/$defs/SequenceArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "capture_job"
+            },
+            "params": {
+              "$ref": "#/$defs/CaptureJobArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "scroll_until"
+            },
+            "params": {
+              "$ref": "#/$defs/ScrollUntilArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "logs"
+            },
+            "params": {
+              "$ref": "#/$defs/LogsArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "screenshot"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "save_frame"
+            },
+            "params": {
+              "$ref": "#/$defs/SaveArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "assert"
+            },
+            "params": {
+              "$ref": "#/$defs/AssertArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "diff"
+            },
+            "params": {
+              "$ref": "#/$defs/DiffArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "restart"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "close"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "$ref": "#/$defs/ScenarioExpectation"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "const": "finalize"
+            },
+            "params": {
+              "$ref": "#/$defs/FinalizeArgs"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/ScenarioPreconditions"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "default": 30000,
+              "maximum": 600000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "operation",
+            "params"
+          ]
+        }
+      ]
+    },
+    "ScenarioTextArgs": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "text"
+      ]
+    },
+    "ScrollUntilArgs": {
+      "description": "Bounded, application-widget navigation. `bindings` are explicit actions\nalready verified against `verified_at`; this is not terminal scrollback.",
+      "type": "object",
+      "properties": {
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentAction"
+          },
+          "maxItems": 8,
+          "minItems": 1
+        },
+        "context": {
+          "$ref": "#/$defs/ActionContext"
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "up",
+            "down"
+          ]
+        },
+        "max_no_progress": {
+          "type": "integer",
+          "format": "uint",
+          "default": 2,
+          "maximum": 32,
+          "minimum": 1
+        },
+        "max_steps": {
+          "type": "integer",
+          "format": "uint",
+          "maximum": 256,
+          "minimum": 1
+        },
+        "region": {
+          "$ref": "#/$defs/CellRect"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/FreshWaitSpec"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 60000,
+          "minimum": 1
+        },
+        "verified_at": {
+          "$ref": "#/$defs/ObservationIdentity"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "context",
+        "direction",
+        "region",
+        "target",
+        "verified_at",
+        "bindings",
+        "max_steps",
+        "timeout_ms"
+      ]
+    },
+    "SequenceArgs": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "start executes the validated sequence; status/cancel require sequence_id.",
+          "type": "string",
+          "enum": [
+            "start",
+            "status",
+            "resume",
+            "cancel"
+          ]
+        },
+        "actor_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "response": {
+          "description": "Contract-v2 projection. Summary is default; full explicitly opts into the report body.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sequence_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "action"
+      ]
+    },
+    "SequenceAuthorityContext": {
+      "type": "object",
+      "properties": {
+        "controller_generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "expected_cols": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "expected_rows": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "expected_viewport_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "expected_viewport_revision",
+        "expected_cols",
+        "expected_rows",
+        "controller_generation"
+      ]
+    },
+    "SequenceIdentity": {
+      "type": "object",
+      "properties": {
+        "actor_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "sequence_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "actor_id",
+        "session_id",
+        "run_id",
+        "sequence_id"
+      ]
+    },
+    "SequenceRequest": {
+      "type": "object",
+      "properties": {
+        "authority": {
+          "description": "Pinned from the caller's observed capabilities at admission. The core\nadvances this only after a confirmed explicit resize action.",
+          "$ref": "#/$defs/SequenceAuthorityContext"
+        },
+        "identity": {
+          "$ref": "#/$defs/SequenceIdentity"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SequenceStep"
+          }
+        },
+        "timeout_ms": {
+          "description": "One deadline for all inputs, delays and barriers in this sequence.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "authority",
+        "timeout_ms",
+        "steps"
+      ]
+    },
+    "SequenceStep": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/AgentAction"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "input"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "action"
+          ]
+        },
+        {
+          "description": "Each key is dispatched as its own AgentAction::Key in array order.\ndelay_ms is applied between adjacent key writes, not before the first.",
+          "type": "object",
+          "properties": {
+            "delay_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "id": {
+              "type": "string"
+            },
+            "keys": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "leader_keys"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "keys",
+            "delay_ms"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "baseline": {
+              "$ref": "#/$defs/BarrierBaseline"
+            },
+            "condition": {
+              "$ref": "#/$defs/BarrierCondition"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "barrier"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "baseline",
+            "condition"
+          ]
+        }
+      ]
+    },
+    "SessionArgs": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id"
+      ]
+    },
+    "ShellSpec": {
+      "type": "object",
+      "properties": {
+        "executable": {
+          "type": "string"
+        },
+        "login": {
+          "type": "boolean",
+          "default": false
+        },
+        "script": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "executable",
+        "script"
+      ]
+    },
+    "StateMode": {
+      "type": "string",
+      "enum": [
+        "isolated",
+        "copy_user",
+        "profile"
+      ]
+    },
+    "StateSeed": {
+      "type": "object",
+      "properties": {
+        "destination": {
+          "description": "Relative to the private state directory (home/config/data/cache/state/tmp).",
+          "type": "string"
+        },
+        "include_credentials": {
+          "type": "boolean",
+          "default": false
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "destination"
+      ]
+    },
+    "WaitArgs": {
+      "type": "object",
+      "properties": {
+        "cancel": {
+          "type": "boolean",
+          "default": false
+        },
+        "poll_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 200,
+          "maximum": 5000,
+          "minimum": 0
+        },
+        "predicate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PredicateSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseOptions"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "session_id": {
+          "type": "string",
+          "default": ""
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30000,
+          "maximum": 3600000,
+          "minimum": 1
+        },
+        "trace_stage": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "wait_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "WheelDirection": {
+      "type": "string",
+      "enum": [
+        "up",
+        "down"
+      ]
+    },
+    "WorkspaceMode": {
+      "type": "string",
+      "enum": [
+        "copy",
+        "reflink"
+      ]
+    },
+    "WorkspaceSpec": {
+      "type": "object",
+      "properties": {
+        "exclude": {
+          "type": "array",
+          "default": [
+            ".git",
+            "target",
+            "node_modules",
+            ".runtime"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "mode": {
+          "$ref": "#/$defs/WorkspaceMode",
+          "default": "copy"
+        },
+        "source": {
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

@@ -5,13 +5,14 @@
 //! back into the source tree.
 
 use anyhow::{Context, Result, bail, ensure};
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum WorkspaceMode {
@@ -20,7 +21,7 @@ pub enum WorkspaceMode {
     Reflink,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkspaceSpec {
     pub mode: WorkspaceMode,
@@ -46,7 +47,7 @@ fn default_excludes() -> Vec<String> {
 }
 
 /// A sanitized description of a prepared snapshot, suitable for launch results.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct WorkspaceManifest {
     pub root: PathBuf,
     pub source: PathBuf,

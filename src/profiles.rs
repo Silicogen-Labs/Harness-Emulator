@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -13,14 +14,14 @@ pub const PROFILE_VERSION: u32 = 1;
 
 /// Values stored in a profile are either non-secret literals or references to
 /// the daemon's environment. Secret values themselves are never persisted.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProfileEnvValue {
     Literal { value: String },
     HostReference { variable: String, secret: bool },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     #[serde(default = "profile_version")]
@@ -39,16 +40,38 @@ pub struct Profile {
     /// Selected state copied into each session snapshot.
     #[serde(default)]
     pub seeds: Vec<StateSeed>,
+    /// Enforced launch requirements, not descriptive metadata. Absent for legacy profiles.
+    #[serde(default)]
+    pub test_policy: Option<TestProfilePolicy>,
     /// Non-secret descriptive fields, such as readiness hints.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct TestProfilePolicy {
+    pub isolation: crate::isolation::IsolationSpec,
+    pub dispose_on_pass: bool,
+}
+
+impl Default for TestProfilePolicy {
+    fn default() -> Self {
+        Self {
+            isolation: crate::isolation::IsolationSpec {
+                backend: crate::isolation::IsolationBackend::Bubblewrap,
+                network: crate::isolation::NetworkPolicy::None,
+            },
+            dispose_on_pass: true,
+        }
+    }
 }
 
 fn profile_version() -> u32 {
     PROFILE_VERSION
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ProfileMetadata {
     pub version: u32,
     pub name: String,
@@ -59,6 +82,7 @@ pub struct ProfileMetadata {
     pub seed_count: usize,
     /// Names only: profile metadata values are deliberately not exported.
     pub metadata_keys: Vec<String>,
+    pub test_policy: Option<TestProfilePolicy>,
 }
 
 pub fn profiles_root(runtime_root: &Path) -> PathBuf {
@@ -91,6 +115,7 @@ pub fn create_profile(runtime_root: &Path, name: &str, description: &str) -> Res
         env_allowlist: Vec::new(),
         env: BTreeMap::new(),
         seeds: Vec::new(),
+        test_policy: None,
         metadata: BTreeMap::new(),
     };
     store_profile_new(runtime_root, &profile)?;
@@ -171,7 +196,7 @@ pub fn silicogen_test_profile_template() -> Profile {
     Profile {
         version: PROFILE_VERSION,
         name: "silicogen-test".into(),
-        description: "Silicogen test profile template; no credentials or model are configured"
+        description: "Enforced Bubblewrap test profile: selected auth/config files, fresh app state, required project copy; no credentials or model configured"
             .into(),
         owner: Some("test".into()),
         env_allowlist: vec!["PATH".into(), "LANG".into(), "LC_ALL".into()],
@@ -180,6 +205,7 @@ pub fn silicogen_test_profile_template() -> Profile {
             ProfileEnvValue::Literal { value: "1".into() },
         )]),
         seeds: Vec::new(),
+        test_policy: Some(TestProfilePolicy::default()),
         metadata,
     }
 }
@@ -210,6 +236,7 @@ fn metadata(profile: &Profile) -> ProfileMetadata {
         credential_reference_names,
         seed_count: profile.seeds.len(),
         metadata_keys: profile.metadata.keys().cloned().collect(),
+        test_policy: profile.test_policy.clone(),
     }
 }
 
@@ -240,6 +267,72 @@ fn validate_profile(profile: &Profile) -> Result<()> {
     for seed in &profile.seeds {
         if seed.include_credentials && !seed.source.is_absolute() {
             bail!("credential seed sources must be explicit absolute paths");
+        }
+        if profile.test_policy.is_some() {
+            validate_test_seed(seed)?;
+        }
+    }
+    if let Some(policy) = &profile.test_policy {
+        if policy.isolation.backend != crate::isolation::IsolationBackend::Bubblewrap {
+            bail!(
+                "test_profile_policy: a testing profile requires bubblewrap; select a legacy host profile explicitly for unrestricted execution"
+            );
+        }
+        for name in &profile.env_allowlist {
+            if looks_secret_name(name) || name.ends_with("_SOCK") {
+                bail!(
+                    "test_profile_policy: {name} may not be ambiently inherited; use an explicit selected credential seed or secret reference"
+                );
+            }
+        }
+        for name in profile.env_allowlist.iter().chain(profile.env.keys()) {
+            validate_test_environment_name(name)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_test_environment_name(name: &str) -> Result<()> {
+    if name.starts_with("LD_") || ["GLIBC_TUNABLES", "GCONV_PATH", "LOCPATH"].contains(&name) {
+        bail!(
+            "test_profile_policy: {name} could alter the sandbox launcher before confinement and is not allowed"
+        );
+    }
+    Ok(())
+}
+
+fn validate_test_seed(seed: &StateSeed) -> Result<()> {
+    ensure_no_symlink_components(&seed.source)?;
+    if !seed.source.is_absolute() || !seed.source.is_file() {
+        bail!(
+            "test_profile_policy: seeds must name selected configuration/credential files, not directories"
+        );
+    }
+    let components: Vec<_> = seed.destination.components().collect();
+    if components.len() < 2
+        || !matches!(
+            components[0].as_os_str().to_str(),
+            Some("home" | "config" | "data")
+        )
+        || components
+            .iter()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        bail!(
+            "test_profile_policy: seed destination must be a selected file under home, config, or data"
+        );
+    }
+    for path in [&seed.source, &seed.destination] {
+        if path.components().any(|part| {
+            let name = part.as_os_str().to_string_lossy().to_ascii_lowercase();
+            matches!(name.as_str(), "log" | "logs" | "cache" | "storage")
+                || name.ends_with(".log")
+                || name.ends_with(".db")
+                || name.contains("sqlite")
+                || name.ends_with("-wal")
+                || name.ends_with("-shm")
+        }) {
+            bail!("test_profile_policy: database, log, and cache seeds are not permitted");
         }
     }
     Ok(())

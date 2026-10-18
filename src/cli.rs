@@ -23,14 +23,22 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Agent operation with validated JSON arguments (profiles/logs/wait/scenarios/cleanup).
+    /// Agent operation with validated JSON arguments (profiles/logs/wait/scenarios/diagnostics/cleanup).
     Agent {
         operation: String,
         #[arg(long, default_value = "{}")]
         json: String,
     },
+    /// Start/read/status/cancel/stop an owned diagnostic or safely seed a copied workspace file.
+    Diagnostics {
+        /// JSON tagged request; see `silicogen-emulation agent diagnostics --json ...` and the MCP schema.
+        #[arg(long)]
+        json: String,
+    },
     /// Run the persistent local session daemon in the foreground.
     Daemon,
+    /// Print the generated scenario JSON Schema shared with MCP.
+    Schema,
     /// Launch an executable with an explicit argument vector.
     Launch(LaunchArgs),
     /// List sessions.
@@ -38,7 +46,11 @@ enum Command {
     /// Read one session's lifecycle state.
     Status { session_id: String },
     /// Capture text, styled cells, terminal modes, and frame identity.
-    Observe { session_id: String },
+    Observe {
+        session_id: String,
+        #[arg(long)]
+        response_json: Option<String>,
+    },
     /// Read a bounded styled-cell rectangle from one frame.
     Cells {
         session_id: String,
@@ -46,6 +58,8 @@ enum Command {
         col: u16,
         rows: u16,
         cols: u16,
+        #[arg(long)]
+        response_json: Option<String>,
     },
     /// Capture a PNG for the current frame.
     Screenshot { session_id: String },
@@ -71,6 +85,17 @@ enum Command {
     Restart { session_id: String },
     /// Close the application process group and release its PTY.
     Close { session_id: String },
+    /// Explicit test outcome; pass disposes configured ephemeral copies, close alone never passes.
+    Finalize {
+        session_id: String,
+        #[arg(long)]
+        expected_run_id: String,
+        /// passed, failed, cancelled, interrupted, or unknown.
+        #[arg(long)]
+        outcome: String,
+        #[arg(long)]
+        actor_id: Option<String>,
+    },
     /// Create a local browser view of the same terminal session.
     ViewStart {
         session_id: String,
@@ -185,6 +210,9 @@ enum WheelDirectionArg {
 #[derive(Debug, Args)]
 struct WaitArgs {
     session_id: String,
+    /// Revision-2 projection, e.g. '{"mode":"summary","max_bytes":1024}'.
+    #[arg(long)]
+    response_json: Option<String>,
     #[arg(long)]
     contains: Option<String>,
     #[arg(long)]
@@ -205,12 +233,26 @@ pub async fn run() -> Result<()> {
     match cli.command {
         Command::Daemon => daemon::run(runtime_dir).await,
         Command::Mcp => crate::mcp::run(runtime_dir).await,
+        Command::Schema => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rmcp::schemars::schema_for!(
+                    silicogen_terminal_runtime::scenario::Scenario
+                ))?
+            );
+            Ok(())
+        }
         command => {
             let client = RuntimeClient::new(runtime_dir);
             let request = match command {
                 Command::Agent { operation, json } => RpcRequest::Agent {
                     operation,
                     params: serde_json::from_str(&json).context("invalid agent parameters JSON")?,
+                },
+                Command::Diagnostics { json } => RpcRequest::Agent {
+                    operation: "diagnostics".into(),
+                    params: serde_json::from_str(&json)
+                        .context("invalid diagnostics request JSON")?,
                 },
                 Command::Launch(launch) => {
                     let cwd = launch
@@ -266,20 +308,27 @@ pub async fn run() -> Result<()> {
                 }
                 Command::List => RpcRequest::List,
                 Command::Status { session_id } => RpcRequest::Status { session_id },
-                Command::Observe { session_id } => RpcRequest::Observe { session_id },
+                Command::Observe {
+                    session_id,
+                    response_json,
+                } => project_request(RpcRequest::Observe { session_id }, response_json)?,
                 Command::Cells {
                     session_id,
                     row,
                     col,
                     rows,
                     cols,
-                } => RpcRequest::Cells {
-                    session_id,
-                    row,
-                    col,
-                    rows,
-                    cols,
-                },
+                    response_json,
+                } => project_request(
+                    RpcRequest::Cells {
+                        session_id,
+                        row,
+                        col,
+                        rows,
+                        cols,
+                    },
+                    response_json,
+                )?,
                 Command::Screenshot { session_id } => RpcRequest::Screenshot { session_id },
                 Command::Key { session_id, key } => RpcRequest::Key { session_id, key },
                 Command::Type { session_id, text } => RpcRequest::Type { session_id, text },
@@ -324,14 +373,26 @@ pub async fn run() -> Result<()> {
                     cols,
                     rows,
                 },
-                Command::Wait(args) => RpcRequest::Wait {
-                    session_id: args.session_id.clone(),
-                    predicate: wait_predicate(&args)?,
-                    timeout_ms: args.timeout_ms,
-                },
+                Command::Wait(args) => project_request(
+                    RpcRequest::Wait {
+                        session_id: args.session_id.clone(),
+                        predicate: wait_predicate(&args)?,
+                        timeout_ms: args.timeout_ms,
+                    },
+                    args.response_json,
+                )?,
                 Command::History { session_id } => RpcRequest::History { session_id },
                 Command::Restart { session_id } => RpcRequest::Restart { session_id },
                 Command::Close { session_id } => RpcRequest::Close { session_id },
+                Command::Finalize {
+                    session_id,
+                    expected_run_id,
+                    outcome,
+                    actor_id,
+                } => RpcRequest::Agent {
+                    operation: "finalize".into(),
+                    params: serde_json::json!({"session_id":session_id,"expected_run_id":expected_run_id,"outcome":outcome,"actor_id":actor_id}),
+                },
                 Command::ViewStart {
                     session_id,
                     allow_browser_control,
@@ -352,12 +413,31 @@ pub async fn run() -> Result<()> {
                     expected_generation,
                 },
                 Command::Shutdown => RpcRequest::Shutdown,
-                Command::Daemon | Command::Mcp => unreachable!(),
+                Command::Daemon | Command::Mcp | Command::Schema => unreachable!(),
             };
-            let result = client.request(request).await?;
+            let v2 = matches!(&request, RpcRequest::Contract { .. })
+                || matches!(&request, RpcRequest::Agent { operation, params } if matches!(operation.trim_start_matches("terminal_"), "locate" | "wait_fresh") || params.get("response").is_some_and(|v| !v.is_null()));
+            let result = if v2 {
+                client.request_v2(request).await?
+            } else {
+                client.request(request).await?
+            };
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
+    }
+}
+
+fn project_request(request: RpcRequest, response: Option<String>) -> Result<RpcRequest> {
+    match response {
+        Some(response) => Ok(RpcRequest::Contract {
+            revision: 2,
+            request: Box::new(request),
+            response: Some(silicogen_terminal_runtime::validation::decode(
+                serde_json::from_str(&response)?,
+            )?),
+        }),
+        None => Ok(request),
     }
 }
 

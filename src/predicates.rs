@@ -6,11 +6,13 @@
 use crate::protocol::{CellSnapshot, FrameSnapshot};
 use anyhow::{Result, bail};
 use regex::Regex;
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[schemars(extend("examples"=[{"kind":"text_contains","text":"READY"},{"kind":"ready","required":["READY"],"busy":["Working"],"crash":["fatal error"]},{"kind":"stable_region","row":0,"col":0,"rows":5,"cols":20,"duration_ms":250}]))]
 pub enum PredicateSpec {
     TextContains {
         text: String,
@@ -54,7 +56,7 @@ pub enum PredicateSpec {
     ProcessExited,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RegionStability {
     pub row: u16,
@@ -64,7 +66,7 @@ pub struct RegionStability {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PredicateOutcome {
     Pending,
@@ -75,7 +77,7 @@ pub enum PredicateOutcome {
     AppCrash,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PredicateResult {
     pub matched: bool,
     pub outcome: PredicateOutcome,
@@ -101,6 +103,7 @@ pub struct PredicateEvaluator {
     text_stable_since: Option<Instant>,
     previous_region: Option<Vec<Vec<CellFingerprint>>>,
     region_stable_since: Option<Instant>,
+    previous_geometry: Option<(u16, u16)>,
     regex: Option<Regex>,
 }
 
@@ -163,11 +166,21 @@ impl PredicateEvaluator {
             text_stable_since: None,
             previous_region: None,
             region_stable_since: None,
+            previous_geometry: None,
             regex,
         })
     }
 
     pub fn observe(&mut self, frame: &FrameSnapshot, now: Instant) -> PredicateResult {
+        let geometry = (frame.cols, frame.rows);
+        if self
+            .previous_geometry
+            .is_some_and(|previous| previous != geometry)
+        {
+            self.previous_region = None;
+            self.region_stable_since = None;
+        }
+        self.previous_geometry = Some(geometry);
         let process_exited = frame.process_state != "running";
         if self.previous_sequence != Some(frame.output_sequence) {
             self.previous_sequence = Some(frame.output_sequence);
@@ -306,6 +319,31 @@ impl PredicateEvaluator {
             missing_markers,
             busy_markers,
             crash_markers,
+        }
+    }
+
+    /// The next time this evaluator can change its answer without another
+    /// observation. Wait drivers should schedule this instant as well as
+    /// listening for revision notifications.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        let duration_for = |since: Option<Instant>, duration_ms: u64| {
+            since.and_then(|instant| instant.checked_add(Duration::from_millis(duration_ms)))
+        };
+        match &self.spec {
+            PredicateSpec::OutputQuiet { duration_ms } => {
+                duration_for(self.quiet_since, *duration_ms)
+            }
+            PredicateSpec::StableText { duration_ms } => {
+                duration_for(self.text_stable_since, *duration_ms)
+            }
+            PredicateSpec::StableRegion { duration_ms, .. } => {
+                duration_for(self.region_stable_since, *duration_ms)
+            }
+            PredicateSpec::Ready {
+                stable_region: Some(region),
+                ..
+            } => duration_for(self.region_stable_since, region.duration_ms),
+            _ => None,
         }
     }
 }

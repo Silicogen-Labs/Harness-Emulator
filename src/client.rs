@@ -36,6 +36,32 @@ impl RuntimeClient {
         &self.runtime_root
     }
 
+    /// Never silently send revision-2 requests/options to an old persistent daemon.
+    pub async fn request_v2(&self, request: RpcRequest) -> Result<serde_json::Value> {
+        let capabilities = self.request(RpcRequest::Ping).await?;
+        if !capabilities["contract_revisions"]
+            .as_array()
+            .is_some_and(|versions| {
+                versions.contains(&serde_json::json!(crate::projection::CONTRACT_REVISION))
+            })
+        {
+            return Err(crate::validation::RequestError::new("contract_revision","daemon supporting revision 2; use a separate current-build runtime or explicitly restart the old daemon").code("contract_mismatch").into());
+        }
+        // Viewer routing is owned by the daemon listener, not SessionService.
+        let request = match request {
+            request @ (RpcRequest::ViewStart { .. }
+            | RpcRequest::ViewStatus { .. }
+            | RpcRequest::ViewStop { .. }
+            | RpcRequest::Contract { .. }) => request,
+            request => RpcRequest::Contract {
+                revision: crate::projection::CONTRACT_REVISION,
+                request: Box::new(request),
+                response: None,
+            },
+        };
+        self.request(request).await
+    }
+
     pub async fn request(&self, request: RpcRequest) -> Result<serde_json::Value> {
         self.ensure_daemon().await?;
         let socket = resolve_runtime_socket(&self.runtime_root)?.socket_path;

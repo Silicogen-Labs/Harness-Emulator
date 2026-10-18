@@ -3,9 +3,10 @@
 use crate::protocol::{CellStyle, FrameSnapshot};
 use anyhow::{Result, bail};
 use regex::Regex;
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FrameAssertion {
     TextContains {
@@ -32,14 +33,14 @@ pub enum FrameAssertion {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AssertionFailure {
     pub path: String,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AssertionReport {
     pub session_id: String,

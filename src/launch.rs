@@ -41,12 +41,87 @@ pub struct PreparedLaunch {
     pub diagnostics: Value,
 }
 
+/// Apply enforced profile policy before admission, copying, or starting a PTY.
+/// Existing profiles without test_policy keep their legacy host behavior.
+pub fn resolve_options(
+    runtime_root: &Path,
+    spec: &mut LaunchSpec,
+    options: &mut LaunchOptions,
+) -> Result<()> {
+    let Some(name) = options.profile.as_deref() else {
+        return Ok(());
+    };
+    if options.state_mode != StateMode::Profile {
+        bail!("test_profile_policy: a named profile requires state_mode=profile");
+    }
+    let profile = match &options.resolved_profile {
+        Some(profile) => profile.clone(),
+        None => load_profile(runtime_root, name)?,
+    };
+    options.resolved_profile = Some(profile.clone());
+    let Some(policy) = &profile.test_policy else {
+        return Ok(());
+    };
+    let workspace = options
+        .workspace
+        .as_ref()
+        .context("test_profile_policy: an independent workspace snapshot is required")?;
+    if options.env_inherit.as_ref().is_some_and(|names| {
+        names
+            .iter()
+            .any(|name| !profile.env_allowlist.contains(name))
+    }) {
+        bail!("test_profile_policy: env_inherit cannot extend the profile environment allowlist");
+    }
+    if !options.seeds.is_empty() {
+        bail!("test_profile_policy: select seed files in the named profile, not launch overrides");
+    }
+    for name in spec.env.keys() {
+        crate::profiles::validate_test_environment_name(name)?;
+    }
+    // A caller cannot downgrade enforced profile requirements through defaults or overrides.
+    options.isolation = policy.isolation.clone();
+    if let Some(suffix) = spec.cwd.strip_prefix("${workspace}") {
+        if (!suffix.is_empty() && !suffix.starts_with('/'))
+            || Path::new(suffix.trim_start_matches('/'))
+                .components()
+                .any(|part| {
+                    matches!(
+                        part,
+                        Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                    )
+                })
+        {
+            bail!("test_profile_policy: cwd must remain inside the selected workspace");
+        }
+    } else if spec.cwd.contains("${workspace}") {
+        bail!("test_profile_policy: workspace cwd must start with its workspace placeholder");
+    }
+    if !spec.cwd.contains("${workspace}") {
+        let source = fs::canonicalize(&workspace.source)
+            .context("test_profile_policy: workspace source unavailable")?;
+        let cwd = fs::canonicalize(&spec.cwd).context("test_profile_policy: cwd unavailable")?;
+        let relative = cwd
+            .strip_prefix(&source)
+            .context("test_profile_policy: cwd must be inside the selected project snapshot")?;
+        spec.cwd = if relative.as_os_str().is_empty() {
+            "${workspace}".into()
+        } else {
+            format!("${{workspace}}/{}", relative.display())
+        };
+    }
+    Ok(())
+}
+
 /// Size of the selected independent state seed copies. The scan follows the
 /// same SQLite/WAL and credential rules as the copy operation.
 pub fn estimate_state_seed_bytes(runtime_root: &Path, options: &LaunchOptions) -> Result<u64> {
     let profile = match (&options.state_mode, options.profile.as_deref()) {
         (StateMode::CopyUser, _) => None,
-        (StateMode::Profile, Some(name)) => Some(load_profile(runtime_root, name)?),
+        (StateMode::Profile, Some(name)) => Some(match &options.resolved_profile {
+            Some(profile) => profile.clone(),
+            None => load_profile(runtime_root, name)?,
+        }),
         (StateMode::Profile, None) => bail!("state_mode=profile requires a named profile"),
         (_, Some(_)) => bail!("a named profile requires state_mode=profile"),
         (_, None) => None,
@@ -129,7 +204,10 @@ pub fn prepare_launch_with_seed_limit(
     validate_launch_options(spec, options)?;
 
     let profile = match (&options.state_mode, options.profile.as_deref()) {
-        (StateMode::Profile, Some(name)) => Some(load_profile(runtime_root, name)?),
+        (StateMode::Profile, Some(name)) => Some(match &options.resolved_profile {
+            Some(profile) => profile.clone(),
+            None => load_profile(runtime_root, name)?,
+        }),
         (StateMode::Profile, None) => bail!("state_mode=profile requires a named profile"),
         (_, Some(_)) => bail!("a named profile requires state_mode=profile"),
         (_, None) => None,
@@ -209,6 +287,7 @@ pub fn prepare_launch_with_seed_limit(
         "seed_count": seeds.len(),
         "credential_seed_count": seeds.iter().filter(|seed| seed.include_credentials).count(),
         "shell": options.shell.as_ref().map(|shell| json!({ "executable": shell.executable, "login": shell.login })),
+        "test_policy": profile.as_ref().and_then(|p| p.test_policy.as_ref()),
     });
     Ok(PreparedLaunch {
         spec: resolved_spec,
@@ -289,6 +368,17 @@ fn resolve_base_environment(
                 env.insert(name.clone(), value);
                 sources.insert(name, "daemon_allowlist".into());
             }
+        }
+    }
+    if options.isolation.backend == crate::isolation::IsolationBackend::Bubblewrap {
+        let filtered: Vec<_> = env
+            .keys()
+            .filter(|name| crate::profiles::validate_test_environment_name(name).is_err())
+            .cloned()
+            .collect();
+        for name in filtered {
+            env.remove(&name);
+            sources.insert(name, "sandbox_launcher_filtered".into());
         }
     }
     Ok((env, sources))

@@ -400,6 +400,9 @@ impl ViewerServer {
         grant.reconnect_hash = None;
         grant.expires = Instant::now();
         grant.revoke.send_replace(true);
+        // Release the evidence lease immediately when no socket still uses it;
+        // outcome disposal must not wait for the listener's idle reaper.
+        prune_grants(&mut store);
         Ok(())
     }
 

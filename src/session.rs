@@ -9,14 +9,14 @@ use crate::protocol::{
     SessionSummary,
 };
 use crate::screenshot;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::time::Instant;
@@ -25,6 +25,7 @@ use ulid::Ulid;
 
 struct RevisionSignal {
     value: Mutex<u64>,
+    changed: Condvar,
     sender: watch::Sender<u64>,
 }
 
@@ -33,6 +34,7 @@ impl RevisionSignal {
         let (sender, _) = watch::channel(0);
         Arc::new(Self {
             value: Mutex::new(0),
+            changed: Condvar::new(),
             sender,
         })
     }
@@ -44,6 +46,7 @@ impl RevisionSignal {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *value = value.saturating_add(1);
         self.sender.send_replace(*value);
+        self.changed.notify_all();
         *value
     }
 
@@ -56,6 +59,21 @@ impl RevisionSignal {
 
     fn subscribe(&self) -> watch::Receiver<u64> {
         self.sender.subscribe()
+    }
+
+    fn wait_for_change(&self, after: u64, timeout: Duration) -> u64 {
+        let value = self
+            .value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *value != after || timeout.is_zero() {
+            return *value;
+        }
+        let (value, _) = self
+            .changed
+            .wait_timeout_while(value, timeout, |current| *current == after)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *value
     }
 }
 
@@ -379,6 +397,9 @@ pub struct Session {
     actor: Mutex<ActorState>,
     lifecycle: SessionLifecycle,
     evidence_lock: Mutex<()>,
+    finalized: AtomicBool,
+    redactor: crate::finalization::Redactor,
+    credential_destinations: Vec<PathBuf>,
 }
 
 #[derive(Default)]
@@ -455,6 +476,134 @@ struct ActorState {
 }
 
 impl Session {
+    /// Build diagnostic authority from this live session's trusted launch state.
+    /// Callers must not construct this from request-supplied cwd/env/isolation.
+    pub(crate) fn with_diagnostic_context<T>(
+        &self,
+        expected_run_id: &str,
+        operation: impl FnOnce(
+            crate::diagnostics::OwnerKey,
+            crate::diagnostics::EffectiveContext,
+            Option<crate::diagnostics::SelectedWorkspace>,
+            crate::finalization::Redactor,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        // Holding the run lock makes the identity check and the operation
+        // atomic with respect to application restart/close.
+        let run = self
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ensure!(
+            run.run_id == expected_run_id,
+            "stale_run: diagnostics target a previous application run"
+        );
+        let (session_state, cwd_value) = {
+            let summary = self
+                .summary
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (summary.state.clone(), summary.cwd.clone())
+        };
+        ensure!(
+            session_state != "closed",
+            "diagnostics_session_closed: closed sessions cannot start or access diagnostics"
+        );
+        let owner = crate::diagnostics::OwnerKey::new(&self.id, &run.run_id)?;
+        let expected_state = self
+            .runtime_root
+            .join("sessions")
+            .join(&self.id)
+            .join("state");
+        crate::profiles::ensure_no_symlink_components(&expected_state)?;
+        let state_root = fs::canonicalize(&expected_state)
+            .context("diagnostics session state is unavailable")?;
+        let recorded_state = self.diagnostics["state_root"]
+            .as_str()
+            .context("trusted launch state root is missing")?;
+        ensure!(
+            fs::canonicalize(recorded_state)? == state_root,
+            "diagnostics state root does not match this session"
+        );
+
+        let workspace = if let Some(recorded_root) = self.diagnostics["workspace"]["root"].as_str()
+        {
+            let expected_workspace = self.runtime_root.join("workspaces").join(&self.id);
+            crate::profiles::ensure_no_symlink_components(&expected_workspace)?;
+            let expected_workspace = fs::canonicalize(expected_workspace)
+                .context("selected copied workspace is unavailable")?;
+            let workspace_root = fs::canonicalize(recorded_root)?;
+            ensure!(
+                workspace_root == expected_workspace && workspace_root.is_dir(),
+                "selected workspace does not match this session's copied workspace"
+            );
+            Some((
+                workspace_root,
+                crate::diagnostics::SelectedWorkspace::from_validated(expected_workspace),
+            ))
+        } else {
+            None
+        };
+
+        let cwd =
+            fs::canonicalize(&cwd_value).context("diagnostic working directory is unavailable")?;
+        ensure!(
+            cwd.is_dir(),
+            "diagnostic working directory is not a directory"
+        );
+        if let Some((workspace_root, _)) = &workspace {
+            ensure!(
+                cwd.starts_with(workspace_root),
+                "session cwd is outside its selected workspace"
+            );
+        }
+
+        let isolation = &self.diagnostics["isolation"];
+        let effective_backend = isolation["effective_backend"]
+            .as_str()
+            .context("trusted effective isolation backend is missing")?;
+        let containment = match effective_backend {
+            "host" => {
+                ensure!(
+                    isolation["network"].as_str() == Some("host"),
+                    "diagnostics_isolation_unavailable: refusing host fallback for requested isolation"
+                );
+                crate::diagnostics::ContainmentPolicy::Host
+            }
+            "bubblewrap" => {
+                let mut writable_roots = vec![state_root];
+                if let Some((workspace_root, _)) = &workspace {
+                    writable_roots.push(workspace_root.clone());
+                }
+                crate::diagnostics::ContainmentPolicy::BubblewrapPidNamespace {
+                    executable: crate::isolation::find_bwrap()?,
+                    writable_roots,
+                    unshare_network: match isolation["network"].as_str() {
+                        Some("none") => true,
+                        Some("host") => false,
+                        _ => anyhow::bail!(
+                            "diagnostics_isolation_unavailable: unknown network policy"
+                        ),
+                    },
+                }
+            }
+            _ => anyhow::bail!(
+                "diagnostics_isolation_unavailable: effective isolation backend is unavailable"
+            ),
+        };
+        let selected = workspace.map(|(_, selected)| selected);
+        operation(
+            owner,
+            crate::diagnostics::EffectiveContext::from_validated(
+                cwd,
+                self.launch_environment.clone(),
+                containment,
+            ),
+            selected,
+            self.redactor.clone(),
+        )
+    }
+
     pub fn launch(runtime_root: &Path, spec: LaunchSpec) -> Result<Arc<Self>> {
         Self::launch_configured(runtime_root, spec, crate::config::LaunchOptions::default())
     }
@@ -579,6 +728,7 @@ impl Session {
     ) -> Result<Arc<Self>> {
         let initial_cols = spec.cols;
         let initial_rows = spec.rows;
+        crate::launch::resolve_options(runtime_root, &mut spec, &mut options)?;
         let run_id = Ulid::generate().to_string();
         let session_dir = runtime_root.join("sessions").join(&session_id);
         create_private_dir(&session_dir)?;
@@ -634,10 +784,11 @@ impl Session {
         if log_root.is_none()
             && let Some(name) = options.profile.as_ref()
         {
-            log_root = crate::profiles::load_profile(runtime_root, name)?
-                .metadata
-                .get("app_log_root")
-                .cloned();
+            let profile = match &options.resolved_profile {
+                Some(profile) => profile.clone(),
+                None => crate::profiles::load_profile(runtime_root, name)?,
+            };
+            log_root = profile.metadata.get("app_log_root").cloned();
         }
         let log_root = log_root.unwrap_or_else(|| "data/silicogen/log".into());
         crate::artifacts::validate_relative(Path::new(&log_root))?;
@@ -645,6 +796,61 @@ impl Session {
         diagnostics["artifact_limits"] = serde_json::json!({"max_bytes":options.metadata.get("artifact_max_bytes").and_then(|v|v.parse::<u64>().ok()).unwrap_or(256*1024*1024),"max_count":options.metadata.get("artifact_max_count").and_then(|v|v.parse::<usize>().ok()).unwrap_or(1000)});
         diagnostics["workspace"] = serde_json::to_value(&workspace)?;
         diagnostics["isolation"] = crate::isolation::capabilities(&options.isolation);
+        diagnostics["safety_warning"] = if options.isolation.backend
+            == crate::isolation::IsolationBackend::Host
+        {
+            serde_json::json!(
+                "Unrestricted host execution: private HOME is state separation, not confinement; a shell can override it. Use an enforced test profile for protected host writes."
+            )
+        } else {
+            serde_json::json!(
+                "Bubblewrap confines direct filesystem writes, but host files remain readable. Copied credentials still access the same remote account and billing."
+            )
+        };
+        if let Some(workspace) = workspace.as_ref() {
+            atomic_json_write(
+                &session_dir.join("workspace-baseline.json"),
+                &crate::finalization::workspace_manifest(&workspace.root)?,
+            )?;
+        }
+        let mut redactor = crate::finalization::Redactor::default();
+        for value in spec.env.values() {
+            redactor.add(value);
+        }
+        let seeds = if let Some(name) = options.profile.as_ref() {
+            match &options.resolved_profile {
+                Some(profile) => profile.seeds.clone(),
+                None => crate::profiles::load_profile(runtime_root, name)?.seeds,
+            }
+        } else {
+            options.seeds.clone()
+        };
+        let mut credential_destinations = Vec::new();
+        diagnostics["credential_directory_seed_count"] = serde_json::json!(
+            seeds
+                .iter()
+                .filter(|seed| seed.include_credentials && seed.source.is_dir())
+                .count()
+        );
+        for seed in seeds
+            .iter()
+            .filter(|seed| seed.include_credentials && seed.source.is_file())
+        {
+            redactor.credential_file(&seed.source)?;
+            credential_destinations.push(seed.destination.clone());
+        }
+        diagnostics["credential_destinations"] = serde_json::json!(credential_destinations);
+        for (name, value) in &prepared.environment {
+            let explicitly_secret =
+                diagnostics["environment_sources"][name] == "profile_secret_reference";
+            if explicitly_secret
+                || ["KEY", "TOKEN", "SECRET", "PASSWORD"]
+                    .iter()
+                    .any(|part| name.contains(part))
+            {
+                redactor.add(value);
+            }
+        }
         let visible_spec = prepared.spec;
         validate_spec(&visible_spec)?;
         let effective_spec = crate::isolation::wrap_command(
@@ -718,6 +924,9 @@ impl Session {
             actor: Mutex::new(ActorState::default()),
             lifecycle: SessionLifecycle::default(),
             evidence_lock: Mutex::new(()),
+            finalized: AtomicBool::new(false),
+            redactor,
+            credential_destinations,
         });
         session.persist_metadata()?;
         Ok(session)
@@ -915,6 +1124,221 @@ impl Session {
         Ok(result)
     }
 
+    /// Dispatch one sequence action and capture its pre-dispatch observation
+    /// while the output engine is locked. This deliberately does not claim
+    /// that the application consumed or acted on the input.
+    pub(crate) fn agent_action_with_receipt(
+        &self,
+        context: &crate::protocol::ActionContext,
+        action: &crate::protocol::AgentAction,
+    ) -> Result<(serde_json::Value, Option<FrameSnapshot>, u64, u64)> {
+        use crate::protocol::AgentAction;
+        if context.actor_id.is_empty()
+            || context.actor_id.len() > 128
+            || context.action_id.is_empty()
+            || context.action_id.len() > 128
+        {
+            bail!("invalid_action: actor/action identifiers must contain 1..128 bytes")
+        }
+        let mut control = self.automation_guard_for(Some(&context.actor_id))?;
+        let current_run = self.summary().run_id;
+        if context.expected_run_id != current_run {
+            bail!(
+                "stale_run: expected {}, current {}",
+                context.expected_run_id,
+                current_run
+            )
+        }
+        let mut actor = self
+            .actor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(generation) = context.controller_generation
+            && generation != actor.generation
+        {
+            bail!("stale_actor: controller generation changed")
+        }
+        let key = format!("{}:{}", context.actor_id, context.action_id);
+        let digest = serde_json::to_string(&(context, action))?;
+        if let Some((_, previous, result)) = actor.results.iter().find(|(id, _, _)| id == &key) {
+            if previous != &digest {
+                bail!("action_conflict: action id was reused with different parameters")
+            }
+            return Ok((result.clone(), None, 0, 0));
+        }
+
+        let run = self
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ensure_running(&run)?;
+        let state = run
+            .process_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .label();
+        let mut engine = run
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current_viewport_revision = self.viewport_revision.load(Ordering::Acquire);
+        if context.expected_viewport_revision != Some(current_viewport_revision) {
+            bail!(
+                "stale_viewport: expected {:?}, current {}",
+                context.expected_viewport_revision,
+                current_viewport_revision
+            )
+        }
+        let (cols, rows) = engine.dimensions();
+        let pre_dispatch = engine.snapshot(&self.id, &run.run_id, &state);
+        let pre_identity = crate::locators::ObservationIdentity {
+            session_id: self.id.clone(),
+            run_id: run.run_id.clone(),
+            frame_id: pre_dispatch.frame_id.clone(),
+            observation_revision: self.revision.current(),
+            viewport_revision: current_viewport_revision,
+            cols,
+            rows,
+        };
+
+        let post_viewport = match action {
+            AgentAction::Key { key } => {
+                let bytes = engine.encode_key(key)?;
+                write_input(&run, "key", &bytes)?;
+                crate::sequences::SequenceViewport {
+                    revision: current_viewport_revision,
+                    cols,
+                    rows,
+                }
+            }
+            AgentAction::Type { text } => {
+                if text.len() > 1024 * 1024 {
+                    bail!("typed text exceeds the 1 MiB request limit")
+                }
+                write_input(&run, "type", text.as_bytes())?;
+                crate::sequences::SequenceViewport {
+                    revision: current_viewport_revision,
+                    cols,
+                    rows,
+                }
+            }
+            AgentAction::Paste { text } => {
+                if text.len() > 1024 * 1024 {
+                    bail!("paste text exceeds the 1 MiB request limit")
+                }
+                let bracketed = engine.mode(tui_test::terminal::emu::TerminalMode::BracketedPaste);
+                let bytes = engine.encode_paste(text);
+                write_input(
+                    &run,
+                    if bracketed {
+                        "paste_bracketed"
+                    } else {
+                        "paste_plain"
+                    },
+                    &bytes,
+                )?;
+                crate::sequences::SequenceViewport {
+                    revision: current_viewport_revision,
+                    cols,
+                    rows,
+                }
+            }
+            AgentAction::Mouse { input } => {
+                let bytes = engine.encode_mouse(input)?;
+                write_input(&run, "mouse", &bytes)?;
+                control.record_browser_mouse(input);
+                crate::sequences::SequenceViewport {
+                    revision: current_viewport_revision,
+                    cols,
+                    rows,
+                }
+            }
+            AgentAction::Resize {
+                cols: next_cols,
+                rows: next_rows,
+            } => {
+                if *next_cols == 0 || *next_rows == 0 || *next_cols > 300 || *next_rows > 120 {
+                    bail!("unsupported terminal size: maximum is 300 columns by 120 rows")
+                }
+                run.master
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .resize(PtySize {
+                        rows: *next_rows,
+                        cols: *next_cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })?;
+                engine.resize(*next_cols, *next_rows)?;
+                let revision = self
+                    .viewport_revision
+                    .fetch_add(1, Ordering::AcqRel)
+                    .saturating_add(1);
+                self.revision.publish();
+                crate::sequences::SequenceViewport {
+                    revision,
+                    cols: *next_cols,
+                    rows: *next_rows,
+                }
+            }
+        };
+        drop(engine);
+        if let AgentAction::Resize { cols, rows } = action {
+            run.history
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_resize(*cols, *rows);
+            let mut spec = self
+                .spec
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            spec.cols = *cols;
+            spec.rows = *rows;
+            drop(spec);
+            let mut summary = self
+                .summary
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            summary.cols = *cols;
+            summary.rows = *rows;
+        }
+        let written_to_pty = !matches!(action, AgentAction::Resize { .. });
+        let receipt = serde_json::json!({
+            "pre_dispatch": pre_identity,
+            "post_dispatch_viewport": post_viewport,
+            "written_to_pty": written_to_pty,
+            "input_disposition": if written_to_pty { "pty_bytes_accepted" } else { "pty_resized" }
+        });
+        let observation_revision = pre_identity.observation_revision;
+        let result = serde_json::json!({
+            "accepted": true,
+            "actor_id": context.actor_id,
+            "action_id": context.action_id,
+            "run_id": current_run,
+            "receipt": receipt
+        });
+        actor.results.push_back((key, digest, result.clone()));
+        while actor.results.len() > 256 {
+            actor.results.pop_front();
+        }
+        drop(run);
+        self.record_event(
+            "agent_action",
+            serde_json::json!({
+                "actor_id": context.actor_id,
+                "action_id": context.action_id,
+                "run_id": current_run,
+                "accepted": true
+            }),
+        );
+        Ok((
+            result,
+            Some(pre_dispatch),
+            observation_revision,
+            current_viewport_revision,
+        ))
+    }
+
     pub fn observe(&self) -> FrameSnapshot {
         let run = self
             .run
@@ -931,8 +1355,39 @@ impl Session {
             .snapshot(&self.id, &run.run_id, &state)
     }
 
+    /// Capture provider cells and their frame/viewport revisions under the
+    /// same run/engine locks used by PTY output and resize updates. `revision`
+    /// is read while the engine lock is held; output publication occurs before
+    /// the reader releases that lock.
+    pub(crate) fn observation_snapshot(&self) -> (FrameSnapshot, u64, u64) {
+        let run = self
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = run
+            .process_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .label();
+        let engine = run
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let frame = engine.snapshot(&self.id, &run.run_id, &state);
+        let observation_revision = self.revision.current();
+        let viewport_revision = self.viewport_revision.load(Ordering::Acquire);
+        (frame, observation_revision, viewport_revision)
+    }
+
     pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
         self.revision.subscribe()
+    }
+
+    /// Block until PTY/session output changes or `timeout` elapses. Waiters
+    /// evaluate their predicates after either event, so quiet/stability timers
+    /// complete even when the terminal emits no further bytes.
+    pub(crate) fn wait_for_change(&self, after: u64, timeout: Duration) -> u64 {
+        self.revision.wait_for_change(after, timeout)
     }
 
     pub fn stream_snapshot(&self) -> Result<StreamFrame> {
@@ -1210,6 +1665,9 @@ impl Session {
             .control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.finalized.load(Ordering::Acquire) {
+            bail!("session_finalized: launch a new session instead of mutating a finalized run");
+        }
         self.reconcile_expired_control(&mut control)?;
         control.authorize_automation()?;
         let actor = self
@@ -1226,11 +1684,41 @@ impl Session {
         Ok(control)
     }
 
+    fn finalization_guard_for(
+        &self,
+        actor_id: Option<&str>,
+    ) -> Result<MutexGuard<'_, ControlState>> {
+        let mut control = self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.reconcile_expired_control(&mut control)?;
+        control.authorize_automation()?;
+        let actor = self
+            .actor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if actor
+            .deadline
+            .is_some_and(|deadline| deadline > Instant::now())
+            && actor.owner.as_deref() != actor_id
+        {
+            bail!(
+                "control_held_by_actor: actor {} owns terminal input",
+                actor.owner.as_deref().unwrap_or("unknown")
+            );
+        }
+        Ok(control)
+    }
+
     fn browser_guard(&self, authority: &BrowserAuthority) -> Result<MutexGuard<'_, ControlState>> {
         let mut control = self
             .control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.finalized.load(Ordering::Acquire) {
+            bail!("session_finalized: browser input is no longer permitted");
+        }
         self.reconcile_expired_control(&mut control)?;
         let run_id = self
             .run
@@ -1532,12 +2020,22 @@ impl Session {
     }
 
     pub(crate) fn evidence_budget_guard(&self, expected_bytes: u64) -> Result<MutexGuard<'_, ()>> {
+        self.evidence_budget_guard_for(expected_bytes, 1)
+    }
+
+    pub(crate) fn evidence_budget_guard_for(
+        &self,
+        expected_bytes: u64,
+        expected_files: usize,
+    ) -> Result<MutexGuard<'_, ()>> {
         let guard = self
             .evidence_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (bytes, count, max_bytes, max_count) = self.evidence_usage()?;
-        if count >= max_count || bytes.saturating_add(expected_bytes) > max_bytes {
+        if count.saturating_add(expected_files) > max_count
+            || bytes.saturating_add(expected_bytes) > max_bytes
+        {
             bail!(
                 "artifact_quota_exceeded: frame evidence would exceed the session artifact budget"
             )
@@ -1666,6 +2164,68 @@ impl Session {
         self.close_with_control(&mut control)
     }
 
+    pub(crate) fn stop_for_finalization(
+        &self,
+        args: &crate::finalization::FinalizeArgs,
+    ) -> Result<()> {
+        if self.summary().run_id != args.expected_run_id {
+            bail!("stale_run: finalization targets an earlier run");
+        }
+        let mut control = self.finalization_guard_for(args.actor_id.as_deref())?;
+        // Recheck under the same input/restart ownership boundary.
+        if self.summary().run_id != args.expected_run_id {
+            bail!("stale_run: finalization targets an earlier run");
+        }
+        if self.finalized.load(Ordering::Acquire) && self.summary().state == "closed" {
+            return Ok(());
+        }
+        self.close_with_control(&mut control)?;
+        self.finalized.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn final_evidence_redactor(&self) -> Result<crate::finalization::Redactor> {
+        let mut redactor = self.redactor.clone();
+        let state = self
+            .runtime_root
+            .join("sessions")
+            .join(&self.id)
+            .join("state");
+        for destination in &self.credential_destinations {
+            let path = state.join(destination);
+            crate::profiles::ensure_no_symlink_components(&path)?;
+            if path.exists() {
+                redactor.credential_file(&path)?;
+            }
+        }
+        Ok(redactor)
+    }
+
+    pub(crate) fn sanitized_final_frame(
+        &self,
+        redactor: &crate::finalization::Redactor,
+    ) -> FrameSnapshot {
+        let mut frame = self.observe();
+        redactor.frame(&mut frame);
+        frame
+    }
+
+    pub(crate) fn remove_seed_credentials(&self) -> Result<()> {
+        let state = self
+            .runtime_root
+            .join("sessions")
+            .join(&self.id)
+            .join("state");
+        for destination in &self.credential_destinations {
+            let path = state.join(destination);
+            crate::profiles::ensure_no_symlink_components(&path)?;
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
+        }
+        Ok(())
+    }
+
     fn close_with_control(&self, _control: &mut ControlState) -> Result<SessionSummary> {
         let _lifecycle = self.retain_evidence()?;
         _control.release_pressed_mouse();
@@ -1690,7 +2250,166 @@ impl Session {
         drop(run);
         self.persist_metadata()?;
         self.persist_history()?;
+        // A clean close is not an outcome. Preserve a bounded sanitized
+        // snapshot so finalization can still capture evidence after reload.
+        // Failure to write it must not prevent process termination; the
+        // finalizer will retain copies and report incomplete evidence.
+        let _ = self.persist_closed_evidence();
         Ok(result)
+    }
+
+    fn persist_closed_evidence(&self) -> Result<()> {
+        const CLOSED_JSON_MAX: usize = 512 * 1024;
+        const CLOSED_PNG_MAX: u64 = 384 * 1024;
+        const MAX_TEXT_BYTES: usize = 64 * 1024;
+        const MAX_ACTIONS: usize = 256;
+        const MAX_ACTION_DETAIL_BYTES: usize = 512;
+
+        let session_dir = self.runtime_root.join("sessions").join(&self.id);
+        let evidence_path = session_dir.join("closed-evidence.json");
+        if evidence_path.exists() {
+            crate::profiles::ensure_no_symlink_components(&evidence_path)?;
+            let existing: serde_json::Value = serde_json::from_slice(&fs::read(&evidence_path)?)?;
+            if existing["version"] == 1 && existing["run_id"] == self.summary().run_id {
+                return Ok(());
+            }
+        }
+
+        let redactor = self.final_evidence_redactor()?;
+        let frame = self.sanitized_final_frame(&redactor);
+        let mut warning = None;
+        let screenshot_path = session_dir.join("closed-final.png");
+        let screenshot = match crate::screenshot::render_png(
+            &frame,
+            &screenshot_path,
+            format!("art-{}", ulid::Ulid::generate()),
+        ) {
+            Ok(screenshot) if fs::metadata(&screenshot_path)?.len() <= CLOSED_PNG_MAX => {
+                Some(screenshot)
+            }
+            Ok(_) => {
+                fs::remove_file(&screenshot_path)?;
+                warning = Some("closed screenshot exceeded its 384 KiB bound".to_owned());
+                None
+            }
+            Err(error) => {
+                warning = Some(format!("closed screenshot unavailable: {error:#}"));
+                None
+            }
+        };
+
+        let history = self.history();
+        let mut actions = history
+            .events
+            .iter()
+            .filter(|event| event.kind != "pty_output")
+            .rev()
+            .take(MAX_ACTIONS)
+            .collect::<Vec<_>>();
+        actions.reverse();
+        let actions_truncated = history
+            .events
+            .iter()
+            .filter(|event| event.kind != "pty_output")
+            .count()
+            > MAX_ACTIONS;
+        let actions = actions
+            .into_iter()
+            .map(|event| {
+                let detail = event
+                    .detail
+                    .as_ref()
+                    .map(|detail| truncate_utf8(&redactor.text(detail), MAX_ACTION_DETAIL_BYTES));
+                serde_json::json!({
+                    "sequence":event.sequence,
+                    "at_ms":event.at_ms,
+                    "kind":event.kind,
+                    "byte_count":event.byte_count,
+                    "sha256":event.sha256,
+                    "detail":detail
+                })
+            })
+            .collect::<Vec<_>>();
+        let workspace = self.diagnostics["workspace"]["root"].as_str();
+        let changed_files = if let Some(workspace) = workspace {
+            let baseline_path = session_dir.join("workspace-baseline.json");
+            let baseline: serde_json::Value = serde_json::from_slice(&fs::read(&baseline_path)?)?;
+            crate::finalization::changed_files(
+                &baseline,
+                &crate::finalization::workspace_manifest(Path::new(workspace))?,
+            )
+        } else {
+            serde_json::json!({"files":{},"complete":true})
+        };
+        let relative_log = self.diagnostics["app_log_root"]
+            .as_str()
+            .unwrap_or("data/silicogen/log");
+        let log_path = session_dir.join("state").join(relative_log).join("dev.log");
+        let log_tail = (|| -> Result<String> {
+            use std::io::Seek;
+            use std::os::unix::fs::OpenOptionsExt;
+            crate::profiles::ensure_no_symlink_components(&log_path)?;
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&log_path)?;
+            let length = file.metadata()?.len();
+            file.seek(std::io::SeekFrom::Start(length.saturating_sub(16 * 1024)))?;
+            let mut bytes = Vec::new();
+            file.take(16 * 1024).read_to_end(&mut bytes)?;
+            Ok(redactor.text(&String::from_utf8_lossy(&bytes)))
+        })();
+        let assertions_path = session_dir.join("assertions.json");
+        let (assertions, assertions_complete) =
+            crate::finalization::load_sanitized_assertions(&assertions_path, &redactor);
+        let (text, text_truncated) = bounded_text(&frame.text, MAX_TEXT_BYTES);
+        let complete = frame.capture_complete
+            && !history.truncated
+            && !actions_truncated
+            && !text_truncated
+            && assertions_complete
+            && screenshot.is_some();
+        let changed_files_complete = changed_files["complete"] == true;
+        let log_tail_available = log_tail.is_ok();
+        let log_tail_value = log_tail.as_ref().ok().cloned();
+        if screenshot.is_none() && warning.is_none() {
+            warning = Some("closed screenshot unavailable".to_owned());
+        }
+        let mut closed = serde_json::json!({
+            "version":1,
+            "session_id":frame.session_id,
+            "run_id":frame.run_id,
+            "frame_id":frame.frame_id,
+            "captured_at_ms":frame.captured_at_ms,
+            "output_sequence":frame.output_sequence,
+            "cols":frame.cols,
+            "rows":frame.rows,
+            "text":text,
+            "actions":actions,
+            "assertions":assertions,
+            "assertions_complete":assertions_complete,
+            "changed_files":changed_files,
+            "log_tail":log_tail_value,
+            "log_tail_available":log_tail_available,
+            "history_truncated":history.truncated || actions_truncated,
+            "raw_recording_enabled":history.raw_recording_enabled,
+            "raw_bytes_in_bundle":false,
+            "sanitized":true,
+            "complete":complete && changed_files_complete,
+            "screenshot":screenshot,
+            "warning":warning
+        });
+        if serde_json::to_vec(&closed)?.len() > CLOSED_JSON_MAX {
+            closed["complete"] = serde_json::json!(false);
+            closed["actions"] = serde_json::json!([]);
+            closed["assertions"] = serde_json::json!([]);
+            closed["assertions_complete"] = serde_json::json!(false);
+            closed["text"] = serde_json::json!(bounded_text(&frame.text, 16 * 1024).0);
+            closed["warning"] =
+                serde_json::json!("closed evidence exceeded its 512 KiB metadata bound");
+        }
+        crate::session::atomic_json_write(&evidence_path, &closed)?;
+        Ok(())
     }
 
     pub fn persist_metadata(&self) -> Result<()> {
@@ -1710,6 +2429,27 @@ impl Session {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         persist_run_history(&self.runtime_root, &self.id, &run)
     }
+}
+
+fn bounded_text(text: &str, max_bytes: usize) -> (String, bool) {
+    if text.len() <= max_bytes {
+        (text.to_owned(), false)
+    } else {
+        (truncate_utf8(text, max_bytes), true)
+    }
+}
+
+fn truncate_utf8(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    const ELLIPSIS: &str = "…";
+    let content_limit = max_bytes.saturating_sub(ELLIPSIS.len());
+    let mut end = content_limit.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ELLIPSIS}", &text[..end])
 }
 
 fn persist_run_history(runtime_root: &Path, session_id: &str, run: &RunResources) -> Result<()> {
@@ -1829,5 +2569,111 @@ fn signal_process_group(group: i32, signal: i32) {
         unsafe {
             libc::kill(-group, signal);
         }
+    }
+}
+
+#[cfg(test)]
+mod revision_signal_tests {
+    use super::{RevisionSignal, Session};
+    use crate::protocol::{ActionContext, AgentAction, LaunchSpec};
+    use std::collections::BTreeMap;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn output_revision_notification_wakes_waiter_without_timer_delay() {
+        let signal = RevisionSignal::new();
+        let waiter_signal = signal.clone();
+        let waiter = std::thread::spawn(move || {
+            let started = Instant::now();
+            let revision = waiter_signal.wait_for_change(0, Duration::from_secs(2));
+            (revision, started.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        signal.publish();
+        let (revision, elapsed) = waiter.join().unwrap();
+        assert_eq!(revision, 1);
+        assert!(elapsed < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn revision_wait_wakes_on_timer_when_output_is_quiet() {
+        let signal = RevisionSignal::new();
+        let started = Instant::now();
+        let revision = signal.wait_for_change(0, Duration::from_millis(50));
+        assert_eq!(revision, 0);
+        assert!(started.elapsed() >= Duration::from_millis(40));
+    }
+
+    #[test]
+    fn authorized_action_receipt_captures_baseline_and_dispatches_without_lock_reentry() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        let cwd = temp.path().to_string_lossy().into_owned();
+        let session = Session::launch(
+            &runtime,
+            LaunchSpec {
+                name: Some("receipt-lock-test".into()),
+                program: "/bin/cat".into(),
+                args: Vec::new(),
+                cwd,
+                env: BTreeMap::new(),
+                cols: 80,
+                rows: 24,
+                record_output: false,
+            },
+        )
+        .unwrap();
+        let actor_id = "receipt-lock-test";
+        let claim = session.claim_actor(actor_id, false).unwrap();
+        let capabilities = session.capabilities();
+        let context = ActionContext {
+            actor_id: actor_id.into(),
+            action_id: "write-once".into(),
+            expected_run_id: session.summary().run_id,
+            expected_viewport_revision: Some(capabilities["viewport_revision"].as_u64().unwrap()),
+            controller_generation: Some(claim["generation"].as_u64().unwrap()),
+        };
+        let (result, baseline, observation_revision, viewport_revision) = session
+            .agent_action_with_receipt(
+                &context,
+                &AgentAction::Type {
+                    text: "atomic-receipt".into(),
+                },
+            )
+            .unwrap();
+        let baseline = baseline.expect("first dispatch returns its captured pre-dispatch frame");
+        assert_eq!(result["receipt"]["written_to_pty"], true);
+        assert_eq!(result["receipt"]["input_disposition"], "pty_bytes_accepted");
+        assert_eq!(
+            result["receipt"]["pre_dispatch"]["frame_id"],
+            baseline.frame_id
+        );
+        assert_eq!(
+            observation_revision,
+            result["receipt"]["pre_dispatch"]["observation_revision"]
+        );
+        assert_eq!(viewport_revision, capabilities["viewport_revision"]);
+        let after_type = session.capabilities();
+        let resize_context = ActionContext {
+            actor_id: actor_id.into(),
+            action_id: "resize-once".into(),
+            expected_run_id: session.summary().run_id,
+            expected_viewport_revision: Some(after_type["viewport_revision"].as_u64().unwrap()),
+            controller_generation: Some(claim["generation"].as_u64().unwrap()),
+        };
+        let (resize, _, _, _) = session
+            .agent_action_with_receipt(&resize_context, &AgentAction::Resize { cols: 90, rows: 30 })
+            .unwrap();
+        assert_eq!(resize["receipt"]["written_to_pty"], false);
+        assert_eq!(resize["receipt"]["input_disposition"], "pty_resized");
+        assert_eq!((session.summary().cols, session.summary().rows), (90, 30));
+        assert!(
+            session
+                .history()
+                .events
+                .iter()
+                .any(|event| event.kind == "resize")
+        );
+        session.close_admin().unwrap();
     }
 }

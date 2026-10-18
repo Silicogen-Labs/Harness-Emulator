@@ -5,6 +5,7 @@
 //! launch, observation, input, artifact, and lifecycle APIs.
 
 use anyhow::{Context, Result, anyhow, bail};
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -29,19 +30,23 @@ const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A versioned scenario document. Validation is performed before a job is
 /// created or any backend operation is executed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Scenario {
+    #[schemars(extend("const"=1))]
     pub version: u16,
+    #[schemars(length(min = 1))]
     pub name: String,
     #[serde(default)]
     pub template_only: bool,
     #[serde(default = "default_overall_timeout")]
+    #[schemars(range(min = 1, max = 86400000))]
     pub timeout_ms: u64,
     #[serde(default)]
     pub close_on_failure: bool,
     #[serde(default)]
     pub close_on_cancel: bool,
+    #[schemars(length(min = 1))]
     pub steps: Vec<ScenarioStep>,
 }
 
@@ -54,7 +59,11 @@ pub struct ScenarioStep {
     pub params: Value,
     /// Backend-enforced input preconditions, passed through under `_preconditions`
     /// after literal variable interpolation.
-    #[serde(default, deserialize_with = "deserialize_preconditions")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_preconditions",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub preconditions: Option<ScenarioPreconditions>,
     #[serde(default = "default_step_timeout")]
     pub timeout_ms: u64,
@@ -62,14 +71,31 @@ pub struct ScenarioStep {
     pub expect: Option<ScenarioExpectation>,
 }
 
+impl schemars::JsonSchema for ScenarioStep {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ScenarioStep".into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        crate::contracts::scenario_step_schema(generator)
+    }
+}
+
 /// Expected state used by a scripted terminal input. Fields are optional for
 /// compatibility; each supplied value is validated before the job can run.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ScenarioPreconditions {
-    #[serde(deserialize_with = "deserialize_present_string")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub expected_run_id: Option<String>,
-    #[serde(deserialize_with = "deserialize_present_u64")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_u64",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub expected_viewport_revision: Option<u64>,
 }
 
@@ -101,7 +127,7 @@ where
 /// Optional machine-checkable result requirement. `pointer` uses JSON Pointer.
 /// Exactly one of `equals` or `truthy` may be supplied; with neither, a
 /// successful backend call is the required result.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioExpectation {
     #[serde(default)]
@@ -112,7 +138,7 @@ pub struct ScenarioExpectation {
     pub truthy: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ScenarioStatus {
     Queued,
@@ -125,7 +151,7 @@ pub enum ScenarioStatus {
     Interrupted,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ScenarioStepOutcome {
     pub step_id: String,
     pub operation: String,
@@ -144,7 +170,7 @@ pub struct ScenarioStepOutcome {
     pub backend_work_may_continue: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ScenarioReport {
     pub schema_version: u16,
     #[serde(alias = "run_id")]
@@ -631,15 +657,21 @@ fn variable_names(text: &str) -> Result<Vec<String>> {
     Ok(found)
 }
 
-const SUPPORTED_OPERATIONS: &[&str] = &[
+pub(crate) const SUPPORTED_OPERATIONS: &[&str] = &[
     "launch",
     "observe",
+    "cells",
+    "locate",
     "key",
     "type",
     "paste",
     "mouse",
     "resize",
     "wait",
+    "wait_fresh",
+    "sequence",
+    "capture_job",
+    "scroll_until",
     "logs",
     "screenshot",
     "save_frame",
@@ -647,6 +679,7 @@ const SUPPORTED_OPERATIONS: &[&str] = &[
     "diff",
     "restart",
     "close",
+    "finalize",
 ];
 
 fn run_scenario(scenario: Scenario, backend: Arc<dyn ScenarioBackend>, job: Arc<Job>) {

@@ -1,4 +1,4 @@
-// Exercises the installed MCP adapter and persistent daemon, not helper mocks.
+// Exercises the production MCP adapter over real stdio/IPC, not helper mocks.
 import assert from "node:assert/strict"
 import fs from "node:fs"
 import path from "node:path"
@@ -13,6 +13,14 @@ const root = fs.mkdtempSync(path.join(project, ".runtime/api."))
 const origin = path.join(root, "origin")
 fs.mkdirSync(origin)
 fs.writeFileSync(path.join(origin, "file.txt"), "original dirty source\n")
+const hostRoot = path.join(root, "host-sentinels")
+fs.mkdirSync(hostRoot)
+const hostSentinels = [
+  [path.join(hostRoot, "auth.json"), "{\"token\":\"synthetic-login-token\"}\n"],
+  [path.join(hostRoot, "settings.json"), "{\"theme\":\"synthetic-config\"}\n"],
+  [path.join(hostRoot, "history.db"), "synthetic-database-sentinel\n"],
+]
+for (const [file, contents] of hostSentinels) fs.writeFileSync(file, contents)
 const report = { runtime: root, checks: [], tools: [] }
 let client
 const cli = (args) => spawnSync(binary, ["--runtime-dir", root, ...args], { encoding: "utf8" })
@@ -26,20 +34,45 @@ async function call(name, args = {}) {
   return result.structuredContent || JSON.parse(result.content.find(x => x.type === "text").text)
 }
 function check(name, condition) { assert(condition, name); report.checks.push(name) }
+function checkHostSentinels(stage) {
+  for (const [file, contents] of hostSentinels) {
+    check(`${stage}: ${path.basename(file)} unchanged`, fs.readFileSync(file, "utf8") === contents)
+  }
+}
 async function ready(id, text) {
   let wait = await call("terminal_wait_ready", { session_id: id, predicate: { kind: "ready", required: [text], busy: [], crash: ["A fatal error occurred!"] }, timeout_ms: 5000, poll_ms: 100 })
   while (wait.status === "pending") wait = await call("terminal_wait_ready", { wait_id: wait.wait_id, poll_ms: 100 })
   check(`wait ${text}`, wait.matched)
 }
+async function waitText(id, text) {
+  let wait = await call("terminal_wait_ready", {
+    session_id: id,
+    predicate: { kind: "text_contains", text },
+    timeout_ms: 10000,
+    poll_ms: 100,
+    response: { mode: "summary" },
+  })
+  while (wait.status === "pending") {
+    wait = await call("terminal_wait_ready", {
+      wait_id: wait.wait_id,
+      poll_ms: 100,
+      response: { mode: "summary" },
+    })
+  }
+  check(`observed ${text}`, wait.matched)
+}
 try {
   await connect()
   report.tools = (await client.listTools()).tools.map(x => x.name).sort()
-  check("36 MCP tools advertised", report.tools.length === 36)
+  const requiredTools = ["terminal_profiles", "terminal_launch", "terminal_observe", "terminal_wait_ready", "terminal_batch", "terminal_assert", "terminal_finalize", "terminal_scenario_run", "terminal_cleanup"]
+  check("required MCP tool identities advertised", requiredTools.every(name => report.tools.includes(name)))
   await call("terminal_profiles", { action: "store", profile: { version: 1, name: "acceptance", env_allowlist: ["PATH", "LANG"], env: {}, seeds: [], metadata: {} } })
   check("dedicated profile listed", (await call("terminal_profiles")).some(p => p.name === "acceptance"))
   const launched = await call("terminal_launch", { program: path.join(project, "target/debug/terminal-fixture"), cwd: "${workspace}", profile: "acceptance", workspace: { mode: "copy", source: origin }, options: { disposable: true }, cols: 100, rows: 30 })
   report.session = launched.session_id
   await ready(report.session, "READY")
+  const negotiated = await call("terminal_observe", { session_id: report.session, response: { mode: "summary" } })
+  check("MCP projection contract revision 2", negotiated.response?.contract_revision === 2)
   check("workspace differs from original", launched.cwd !== origin && launched.workspace === launched.cwd)
   check("original source copied", fs.readFileSync(path.join(launched.cwd, "file.txt"), "utf8") === "original dirty source\n")
   await client.close()
@@ -96,6 +129,64 @@ try {
   const workspace = status.variables.workspace
   check("nvim edit saved inside snapshot", fs.readFileSync(path.join(workspace, "file.txt"), "utf8").startsWith("snapshot-only "))
   check("original repo unchanged", fs.readFileSync(path.join(origin, "file.txt"), "utf8") === "original dirty source\n")
+
+  const testProfile = await call("terminal_profiles", { action: "template" })
+  testProfile.name = "acceptance-test"
+  testProfile.seeds = [
+    { source: hostSentinels[0][0], destination: "data/silicogen/auth.json", include_credentials: true },
+    { source: hostSentinels[1][0], destination: "config/silicogen/settings.json", include_credentials: false },
+  ]
+  await call("terminal_profiles", { action: "store", profile: testProfile })
+  const editor = await call("terminal_launch", {
+    name: "synthetic write undo restart close",
+    program: "/usr/bin/nvim",
+    args: ["--clean", "file.txt"],
+    cwd: "${workspace}",
+    profile: "acceptance-test",
+    workspace: { mode: "copy", source: origin },
+    options: { disposable: true },
+    cols: 80,
+    rows: 24,
+  })
+  report.editor_session = editor.session_id
+  const editorCopy = path.join(editor.workspace, "file.txt")
+  const originalText = "original dirty source\n"
+  const editorState = path.join(root, "sessions", editor.session_id, "state")
+  check("synthetic auth seed copied into private state", fs.readFileSync(path.join(editorState, "data/silicogen/auth.json"), "utf8") === hostSentinels[0][1])
+  check("synthetic config seed copied into private state", fs.readFileSync(path.join(editorState, "config/silicogen/settings.json"), "utf8") === hostSentinels[1][1])
+  checkHostSentinels("before edit")
+  await waitText(editor.session_id, "original dirty source")
+  await call("terminal_key", { session_id: editor.session_id, key: "i" })
+  await call("terminal_type", { session_id: editor.session_id, text: "snapshot-only " })
+  await waitText(editor.session_id, "snapshot-only original dirty source")
+  await call("terminal_key", { session_id: editor.session_id, key: "Escape" })
+  await call("terminal_type", { session_id: editor.session_id, text: ":write" })
+  await call("terminal_key", { session_id: editor.session_id, key: "Enter" })
+  await waitText(editor.session_id, "written")
+  check("editor write landed only in copied workspace", fs.readFileSync(editorCopy, "utf8") === `snapshot-only ${originalText}`)
+  check("host source unchanged after write", fs.readFileSync(path.join(origin, "file.txt"), "utf8") === originalText)
+  checkHostSentinels("after write")
+  await call("terminal_key", { session_id: editor.session_id, key: "u" })
+  await waitText(editor.session_id, "original dirty source")
+  await call("terminal_type", { session_id: editor.session_id, text: ":write" })
+  await call("terminal_key", { session_id: editor.session_id, key: "Enter" })
+  await waitText(editor.session_id, "written")
+  check("undo restored copied file and saved it", fs.readFileSync(editorCopy, "utf8") === originalText)
+  checkHostSentinels("after undo")
+  const editorRestart = await call("terminal_restart", { session_id: editor.session_id })
+  check("editor restart changes run identity", editorRestart.run_id !== editor.run_id)
+  await waitText(editor.session_id, "original dirty source")
+  check("copied file survives restart", fs.readFileSync(editorCopy, "utf8") === originalText)
+  check("synthetic auth seed survives restart", fs.readFileSync(path.join(editorState, "data/silicogen/auth.json"), "utf8") === hostSentinels[0][1])
+  checkHostSentinels("after restart")
+  await call("terminal_close", { session_id: editor.session_id })
+  check("editor close recorded", (await call("terminal_status", { session_id: editor.session_id })).state === "closed")
+  const editorFinal = await call("terminal_finalize", { session_id: editor.session_id, expected_run_id: editorRestart.run_id, outcome: "passed" })
+  check("post-close finalization has complete evidence", editorFinal.evidence?.complete === true)
+  check("passed test disposes copied workspace", editorFinal.disposal === "disposed" && !fs.existsSync(editor.workspace))
+  check("host source unchanged after restart and close", fs.readFileSync(path.join(origin, "file.txt"), "utf8") === originalText)
+  checkHostSentinels("after close and finalization")
+
   const oldRun = launched.run_id
   const restarted = await call("terminal_restart", { session_id: report.session })
   check("restart changes run identity", restarted.run_id !== oldRun)

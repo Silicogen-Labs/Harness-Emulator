@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "ruleId": "main-busy-turn",
+      "match": { "model": "fixture-main", "stream": true },
+      "responses": [{ "delayMs": 1800, "content": "The delayed main turn completed.", "finishReason": "stop" }]
+    },
+    {
+      "ruleId": "recap-delayed",
+      "match": { "model": "fixture-recap", "stream": true },
+      "responses": [{ "delayMs": 1800, "content": "{\"summary\":\"The recap completed after a controlled delay.\",\"next_action\":null}", "finishReason": "stop" }]
+    },
+    {
+      "ruleId": "title-fast",
+      "match": { "model": "fixture-title", "stream": true },
+      "responses": [{ "content": "Delayed fixture run", "finishReason": "stop" }]
+    },
+    {
+      "ruleId": "summary-fast",
+      "match": { "model": "fixture-summary", "stream": true },
+      "responses": [{ "content": "The delayed fixture run completed.", "finishReason": "stop" }]
+    },
+    {
+      "ruleId": "recap-turn-delayed",
+      "match": { "model": "fixture-recap-turn", "stream": true },
+      "responses": [{ "delayMs": 1800, "content": "{\"summary\":\"Turn recap completed after a controlled delay.\",\"next_action\":null}", "finishReason": "stop" }]
+    }
+  ]
+}

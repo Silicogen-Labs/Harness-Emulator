@@ -29,45 +29,7 @@ impl StreamFrame {
         control: ControlStatus,
         session_state: String,
     ) -> Option<Self> {
-        let mut style_ids = BTreeMap::<CellStyle, u16>::new();
-        let mut styles = Vec::new();
-        let mut cells = Vec::with_capacity(frame.cells.len());
-
-        for row in &frame.cells {
-            let mut compact_row = Vec::with_capacity(row.len());
-            for cell in row {
-                let style = CellStyle {
-                    foreground: cell.resolved_foreground.clone(),
-                    background: cell.resolved_background.clone(),
-                    bold: cell.bold,
-                    dim: cell.dim,
-                    italic: cell.italic,
-                    inverse: cell.inverse,
-                    invisible: cell.invisible,
-                    strike: cell.strike,
-                    blink: cell.blink,
-                    underline: cell.underline.clone(),
-                    underline_color: cell.underline_color.clone(),
-                    hyperlink: None,
-                };
-                let style_id = if let Some(id) = style_ids.get(&style) {
-                    *id
-                } else {
-                    let id = u16::try_from(styles.len()).ok()?;
-                    styles.push(style.clone());
-                    style_ids.insert(style, id);
-                    id
-                };
-                compact_row.push(StreamCell(
-                    cell.text.clone(),
-                    u8::try_from(cell.width).ok()?,
-                    style_id,
-                    cell.text.is_empty(),
-                    cell.hyperlink.clone(),
-                ));
-            }
-            cells.push(compact_row);
-        }
+        let (styles, cells) = compact_cells(&frame.cells)?;
 
         Some(Self {
             stream_version: STREAM_VERSION,
@@ -81,6 +43,53 @@ impl StreamFrame {
             cells,
         })
     }
+}
+
+/// Shared browser/MCP cell encoding; palette colors are resolved once per style.
+pub fn compact_cells(
+    grid: &[Vec<crate::protocol::CellSnapshot>],
+) -> Option<(Vec<CellStyle>, Vec<Vec<StreamCell>>)> {
+    let mut style_ids = BTreeMap::<CellStyle, u16>::new();
+    let mut styles = Vec::new();
+    let mut cells = Vec::with_capacity(grid.len());
+
+    for row in grid {
+        let mut compact_row = Vec::with_capacity(row.len());
+        for cell in row {
+            let style = CellStyle {
+                foreground: cell.resolved_foreground.clone(),
+                background: cell.resolved_background.clone(),
+                bold: cell.bold,
+                dim: cell.dim,
+                italic: cell.italic,
+                inverse: cell.inverse,
+                invisible: cell.invisible,
+                strike: cell.strike,
+                blink: cell.blink,
+                underline: cell.underline.clone(),
+                underline_color: cell.underline_color.clone(),
+                hyperlink: None,
+            };
+            let style_id = if let Some(id) = style_ids.get(&style) {
+                *id
+            } else {
+                let id = u16::try_from(styles.len()).ok()?;
+                styles.push(style.clone());
+                style_ids.insert(style, id);
+                id
+            };
+            compact_row.push(StreamCell(
+                cell.text.clone(),
+                u8::try_from(cell.width).ok()?,
+                style_id,
+                cell.text.is_empty(),
+                cell.hyperlink.clone(),
+            ));
+        }
+        cells.push(compact_row);
+    }
+
+    Some((styles, cells))
 }
 
 #[cfg(test)]

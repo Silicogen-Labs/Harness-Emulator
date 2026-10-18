@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "ruleId": "acceptance-main",
+      "match": { "model": "fixture-main", "stream": true },
+      "responses": [
+        { "status": 503 },
+        {
+          "toolCalls": [{ "id": "acceptance_write", "name": "write", "arguments": { "filePath": "fixture-output.txt", "content": "scripted provider acceptance\n" } }],
+          "finishReason": "tool_calls"
+        },
+        { "content": "Created fixture-output.txt with the exact scripted contents.", "finishReason": "stop" }
+      ]
+    },
+    {
+      "ruleId": "acceptance-title",
+      "match": { "model": "fixture-title", "stream": true },
+      "responses": [
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" },
+        { "content": "Scripted provider acceptance", "finishReason": "stop" }
+      ]
+    },
+    {
+      "ruleId": "acceptance-summary",
+      "match": { "model": "fixture-summary", "stream": true },
+      "responses": [{ "content": "Created fixture-output.txt with the exact scripted contents.", "finishReason": "stop" }]
+    },
+    {
+      "ruleId": "acceptance-catchup",
+      "match": { "model": "fixture-recap", "stream": true },
+      "responses": [{ "content": "{\"summary\":\"The scripted turn created fixture-output.txt.\",\"next_action\":null}", "finishReason": "stop" }]
+    },
+    {
+      "ruleId": "acceptance-turn-recap",
+      "match": { "model": "fixture-recap-turn", "stream": true },
+      "responses": [{ "content": "{\"summary\":\"The turn wrote fixture-output.txt.\",\"next_action\":null}", "finishReason": "stop" }]
+    }
+  ]
+}

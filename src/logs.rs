@@ -4,12 +4,13 @@ use crate::artifacts::{
     ArtifactMetadata, ArtifactSourceKind, ArtifactStore, MAX_ARTIFACT_READ, open_relative_file,
 };
 use anyhow::{Context, Result, bail};
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LogCursor {
     pub artifact_id: String,
@@ -18,7 +19,7 @@ pub struct LogCursor {
     pub offset: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LogGap {
     Rotated,

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json.schemastore.org/silicogen.json",
+  "model": "emulation-fixture/fixture-main",
+  "enabled_providers": ["emulation-fixture"],
+  "provider": {
+    "emulation-fixture": {
+      "id": "emulation-fixture",
+      "name": "Scripted Emulation Fixture",
+      "api": "http://127.0.0.1:43127/v1",
+      "npm": "@ai-sdk/openai-compatible",
+      "env": ["EMULATION_FIXTURE_API_KEY"],
+      "models": {
+        "fixture-main": { "id": "fixture-main", "name": "Synthetic main turn", "release_date": "2026-10-18", "limit": { "context": 262144, "output": 1024 }, "attachment": false, "reasoning": false, "temperature": true, "tool_call": true, "modalities": { "input": ["text"], "output": ["text"] }, "options": {} },
+        "fixture-title": { "id": "fixture-title", "name": "Synthetic title helper", "release_date": "2026-10-18", "limit": { "context": 262144, "output": 256 }, "attachment": false, "reasoning": false, "temperature": true, "tool_call": false, "modalities": { "input": ["text"], "output": ["text"] }, "options": {} },
+        "fixture-summary": { "id": "fixture-summary", "name": "Synthetic summary helper", "release_date": "2026-10-18", "limit": { "context": 262144, "output": 512 }, "attachment": false, "reasoning": false, "temperature": true, "tool_call": false, "modalities": { "input": ["text"], "output": ["text"] }, "options": {} },
+        "fixture-recap": { "id": "fixture-recap", "name": "Synthetic recap helper", "release_date": "2026-10-18", "limit": { "context": 262144, "output": 512 }, "attachment": false, "reasoning": false, "temperature": true, "tool_call": false, "modalities": { "input": ["text"], "output": ["text"] }, "options": {} },
+        "fixture-recap-turn": { "id": "fixture-recap-turn", "name": "Synthetic turn recap helper", "release_date": "2026-10-18", "limit": { "context": 262144, "output": 512 }, "attachment": false, "reasoning": false, "temperature": true, "tool_call": false, "modalities": { "input": ["text"], "output": ["text"] }, "options": {} }
+      }
+    }
+  },
+  "agent": {
+    "title": { "model": "emulation-fixture/fixture-title" },
+    "summary": { "model": "emulation-fixture/fixture-summary" },
+    "recap": { "model": "emulation-fixture/fixture-recap" },
+    "recap_turn": { "model": "emulation-fixture/fixture-recap-turn" }
+  }
+}

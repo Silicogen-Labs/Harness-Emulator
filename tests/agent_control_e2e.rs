@@ -767,6 +767,16 @@ async fn cleanup_and_view_start_have_one_atomic_evidence_lease_boundary() {
         .unwrap()
         .0;
     let screenshot_path = PathBuf::from(screenshot["path"].as_str().unwrap());
+    // A disposable allocation is not a test pass. Explicitly finalize it before
+    // exercising retention's cleanup/view-start race.
+    agent(
+        &service,
+        "finalize",
+        json!({
+            "session_id":session_id,"expected_run_id":launched["run_id"],"outcome":"passed"
+        }),
+    )
+    .unwrap();
     let preview = agent(&service, "cleanup", json!({})).unwrap();
     let plan = preview;
     assert!(

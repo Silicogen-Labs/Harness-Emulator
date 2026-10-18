@@ -10,7 +10,7 @@ import { Client } from "../browser-tests/node_modules/@modelcontextprotocol/sdk/
 import { StdioClientTransport } from "../browser-tests/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js"
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
-const binary = path.join(root, ".local/bin/silicogen-emulation")
+const binary = process.env.EMULATION_BINARY || path.join(root, "target/release/silicogen-emulation")
 const demo = spawnSync("bash", [path.join(root, "fixtures/run-silicogen-subagents-demo.sh")], { cwd: root, env: process.env, encoding: "utf8", timeout: 60000, maxBuffer: 4 * 1024 * 1024 })
 assert.equal(demo.status, 0, demo.stderr || demo.stdout)
 const runtime = demo.stdout.match(/^Runtime data:\s+(.+)$/m)[1]
@@ -24,7 +24,9 @@ async function call(name, args = {}) {
 }
 try {
   await client.connect(new StdioClientTransport({ command: binary, args: ["--runtime-dir", runtime, "mcp"], stderr: "pipe" }))
-  assert.equal((await client.listTools()).tools.length, 36)
+  const tools = new Set((await client.listTools()).tools.map(tool => tool.name))
+  const requiredTools = ["terminal_launch", "terminal_observe", "terminal_wait_ready", "terminal_batch", "terminal_assert", "terminal_finalize", "terminal_scenario_run", "terminal_cleanup"]
+  assert(requiredTools.every(name => tools.has(name)), `missing required MCP tools: ${requiredTools.filter(name => !tools.has(name)).join(", ")}`)
   const old = await call("terminal_status", { session_id: originalId })
   await call("terminal_close", { session_id: originalId })
   const source = process.env.SILICOGEN_SOURCE_DIR || path.resolve(root, "../Silicogen-AI")
@@ -37,6 +39,8 @@ try {
   const id = launched.session_id
   report.session_id = id
   assert.equal(launched.capabilities.launch.state_mode, "profile")
+  const contract = await call("terminal_observe", { session_id: id, response: { mode: "summary" } })
+  assert.equal(contract.response?.contract_revision, 2, "MCP projection contract revision 2 must be negotiated")
   const step = (id, operation, params, expect) => ({ id, operation, params: { session_id: launched.session_id, ...params }, ...(expect ? { expect } : {}) })
   const key = (id, key) => step(id, "key", { key })
   const wait = (id, text) => step(id, "wait", { predicate: { kind: "text_contains", text }, timeout_ms: 15000, trace_stage: id === "startup" || id === "recovered" ? "tui-complete" : undefined })
